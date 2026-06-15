@@ -91,6 +91,9 @@ final class App {
     }
 
     private func apply(_ r: SlotResult) {
+        // Ignore captured audio while transmitting — it's the rig's TX monitor,
+        // not real receive, so it would show phantom decodes/waterfall.
+        guard !tuning else { return }
         slotCount += 1
         spectrum = r.spectrum
         for m in r.messages.sorted(by: { $0.score > $1.score }) {
@@ -244,8 +247,9 @@ final class App {
         func power(_ m: RigMeters?) -> Float { m?.powerWatts ?? ((m?.powerPercent ?? 0) * 100) }
 
         let startDb: Float = -45
-        let maxDb: Float = -10   // backstop; the knee plateau normally stops us first
-        var samples: [(db: Float, power: Float)] = []
+        let maxDb: Float = -10   // backstop; ALC onset / power plateau normally stop us first
+        let alcClean: Float = 0.05  // ALC at/below this = essentially no ALC action
+        var samples: [(db: Float, power: Float, alc: Float)] = []
         var maxPower: Float = 0
         var flat = 0
         var db = startDb
@@ -257,33 +261,45 @@ final class App {
             let m = await rig.meters()
             lastMeters = m
             let p = power(m)
-            samples.append((db, p))
-            notice = String(format: "auto-tune: %+.0f dBFS  %.0f W  ALC %.2f", db, p, m?.alc ?? 0)
+            let alc = m?.alc ?? 0
+            samples.append((db, p, alc))
+            notice = String(format: "auto-tune: %+.0f dBFS  %.0f W  ALC %.2f", db, p, alc)
             render()
 
-            // A real increase resets the plateau counter; a non-increase counts.
             if p > maxPower + max(0.5, maxPower * 0.02) {
                 maxPower = p
                 flat = 0
             } else {
                 flat += 1
             }
-            // Only call it plateaued once we actually have meaningful power, so
-            // the dead low end of the sweep can't trip it (the old "1 W" bug).
+            // Stop once ALC is clearly deflecting and power has stopped climbing,
+            // or power plateaus with meaningful output (guards the dead low end).
+            if alc > 0.15 && flat >= 1 { break }
             if flat >= 3 && maxPower > 5 { break }
             db += 1
         }
 
-        // Knee = lowest drive reaching ~97% of peak power.
-        let target = maxPower * 0.97
-        let knee = samples.first(where: { $0.power >= target })?.db
-            ?? samples.max(by: { $0.power < $1.power })?.db
-            ?? txLevelDb
+        // Prefer the CLEAN knee: the highest drive that keeps ALC near zero (best
+        // for FT8). Fall back to the lowest drive reaching ~97% of peak if ALC
+        // never deflected.
+        let knee: Float
+        let resultAlc: Float
+        if let clean = samples.filter({ $0.alc <= alcClean && $0.power > maxPower * 0.5 })
+                              .max(by: { $0.db < $1.db }) {
+            knee = clean.db
+            resultAlc = clean.alc
+        } else {
+            let target = maxPower * 0.97
+            let pick = samples.first(where: { $0.power >= target }) ?? samples.max(by: { $0.power < $1.power })
+            knee = pick?.db ?? txLevelDb
+            resultAlc = pick?.alc ?? 0
+        }
 
         setLevelDb(knee)
         try? await Task.sleep(nanoseconds: 300_000_000)
         lastMeters = await rig.meters()
-        notice = String(format: "auto-tune → %+.0f dBFS (≈%.0f W peak)", knee, maxPower)
+        let finalPower = power(lastMeters)
+        notice = String(format: "auto-tune → %+.0f dBFS  ≈%.0f W  ALC %.2f", knee, finalPower, resultAlc)
         render()
     }
 
@@ -359,6 +375,19 @@ final class App {
     }
 
     private func renderSpectrum(height: Int, width: Int) -> String {
+        if tuning {
+            var s = ""
+            let mid = height / 2
+            for row in 0..<height {
+                if row == mid {
+                    s += "  \(Terminal.fg256(196))▶ transmitting\(Terminal.reset) "
+                        + "\(Terminal.dim)— receive paused\(Terminal.reset)\r\n"
+                } else {
+                    s += "\r\n"
+                }
+            }
+            return s
+        }
         guard !spectrum.isEmpty else {
             var s = ""
             for _ in 0..<height { s += Terminal.dim + "  (awaiting first slot…)".padding(toLength: min(width, 40), withPad: " ", startingAt: 0) + Terminal.reset + "\r\n" }
