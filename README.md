@@ -47,8 +47,18 @@ arrays at start/middle/end). A 77-bit message + 14-bit CRC is LDPC-encoded to 17
 
 ## Status
 
-Early scaffolding. See [`docs/architecture.md`](docs/architecture.md) and
+Working FT8 decoder + a terminal client. A headless `FT8808Engine` library
+holds the radio logic; front-ends are thin clients over it (terminal now, native
+macOS app later). See [`docs/architecture.md`](docs/architecture.md) and
 [`docs/roadmap.md`](docs/roadmap.md).
+
+```sh
+swift run ft8decode path/to/slot.wav          # one-shot decode, WSJT-X-style lines
+swift run ft8term  path/to/slot.wav           # terminal UI: spectrum + band activity
+```
+
+`ft8term` runs interactively in a TTY (`q` to quit) and in batch mode when piped
+(processes the file, prints the final frame, exits).
 
 ## Licensing
 
