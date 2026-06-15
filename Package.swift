@@ -13,7 +13,6 @@ let package = Package(
         .executable(name: "ft8decode", targets: ["ft8decode"]),
         .executable(name: "ft8term", targets: ["ft8term"]),
         .executable(name: "ft8rig", targets: ["ft8rig"]),
-        .executable(name: "ft8tune", targets: ["ft8tune"]),
     ],
     targets: [
         // Vendored kgoba/ft8_lib (MIT) plus the FT8-808 C shim.
@@ -84,11 +83,6 @@ let package = Package(
         // Rig-control diagnostics.
         .executableTarget(
             name: "ft8rig",
-            dependencies: ["FT8808Engine", "HamlibRig"]
-        ),
-        // Transmit-audio calibration (tune).
-        .executableTarget(
-            name: "ft8tune",
             dependencies: ["FT8808Engine", "HamlibRig"]
         ),
         .testTarget(

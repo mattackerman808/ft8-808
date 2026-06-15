@@ -57,8 +57,9 @@ macOS app later. See [architecture.md](architecture.md).
       RR73 at multiple audio offsets (no RF).
 - [x] Audio OUTPUT path: `TxAudioOutput` (AVAudioEngine output node + device
       selection) and `ToneGenerator` (pure, unit-tested).
-- [x] `ft8tune` — transmit-audio calibration like WSJT-X Tune: keys PTT, plays a
-      steady tone, live level adjust; emergency un-key on Ctrl-C (signal handler).
+- [x] Tune built into the app (`ft8term`): press `T` to key PTT + play a steady
+      tone, `+/-` to set drive, `T` to stop — WSJT-X-style calibration. Emergency
+      un-key on Ctrl-C/SIGTERM and on quit. (No separate binary.)
 - [ ] Verify tune on-air: set drive for full rated power with NO ALC (dummy load).
 - [ ] On-air FT8 TX: play synthesized slot audio with PTT at the UTC boundary.
 - [ ] Close the loop: complete an automated QSO from `ft8term`.

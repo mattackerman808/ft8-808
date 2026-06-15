@@ -28,6 +28,8 @@ final class App {
     let source: any AudioSource
     let rig: RigController
     let sourceLabel: String
+    let outDevice: String?
+    let tuneFreq: Float
 
     private var spectrum: [Float] = []
     private var activity: [ActivityLine] = []
@@ -37,13 +39,23 @@ final class App {
     private var rigState = RigState(frequencyHz: 14_074_000, mode: .usb,
                                     transmitting: false, connected: true)
 
-    init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController) {
+    // Tune (transmit-audio calibration) state.
+    private var tx: TxAudioOutput?
+    private var tuning = false
+    private var tuneBusy = false        // guards async start/stop transitions
+    private var txLevel: Float = 0.05
+    private var notice: String?
+
+    init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController,
+         outDevice: String?, tuneFreq: Float = 1500) {
         let (rows, cols) = Terminal.size()
         _ = rows
         self.engine = DecodeEngine(proto: proto, spectrumColumns: max(20, cols - 2))
         self.source = source
         self.rig = rig
         self.sourceLabel = label
+        self.outDevice = outDevice
+        self.tuneFreq = tuneFreq
     }
 
     private let interactive = isatty(STDIN_FILENO) == 1
@@ -64,6 +76,9 @@ final class App {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             self.quit = c
         }
+        // Always leave the rig in receive on the way out.
+        tx?.stop(); tx = nil
+        if tuning { try? await rig.setPTT(false); tuning = false }
         consume.cancel()
     }
 
@@ -117,9 +132,66 @@ final class App {
         switch c {
         case UInt8(ascii: "q"), 3:
             quit?.resume(); quit = nil
+        case UInt8(ascii: "t"), UInt8(ascii: "T"):
+            toggleTune()
+        case UInt8(ascii: "+"), UInt8(ascii: "="):
+            if tuning { setLevel(txLevel + 0.02) }
+        case UInt8(ascii: "-"), UInt8(ascii: "_"):
+            if tuning { setLevel(txLevel - 0.02) }
         default:
             break
         }
+    }
+
+    // ---- Tune (transmit-audio calibration) -----------------------------------
+
+    private func toggleTune() {
+        guard !tuneBusy else { return }
+        if tuning { Task { await stopTune() } }
+        else { Task { await startTune() } }
+    }
+
+    private func startTune() async {
+        guard !tuning, !tuneBusy else { return }
+        tuneBusy = true
+        defer { tuneBusy = false }
+
+        let out = TxAudioOutput(frequencyHz: tuneFreq, device: outDevice)
+        out.amplitude = txLevel
+        do {
+            try out.start()
+            try await rig.setPTT(true)
+        } catch {
+            out.stop()
+            try? await rig.setPTT(false)
+            notice = "tune failed: \(error)"
+            render()
+            return
+        }
+        tx = out
+        tuning = true
+        rigState.transmitting = true
+        notice = nil
+        render()
+    }
+
+    private func stopTune() async {
+        guard tuning, !tuneBusy else { return }
+        tuneBusy = true
+        defer { tuneBusy = false }
+
+        tx?.stop()
+        tx = nil
+        try? await rig.setPTT(false)
+        tuning = false
+        rigState.transmitting = false
+        render()
+    }
+
+    private func setLevel(_ v: Float) {
+        txLevel = max(0, min(1, v))
+        tx?.amplitude = txLevel
+        render()
     }
 
     // ---- Rendering -----------------------------------------------------------
@@ -132,8 +204,8 @@ final class App {
         let utc = Self.utcStamp()
         let s = rigState
         let mhz = String(format: "%.3f", Double(s.frequencyHz) / 1_000_000)
-        let tx = s.transmitting ? "\(Terminal.fg256(196))TX\(Terminal.reset)"
-                                : "\(Terminal.fg256(46))RX\(Terminal.reset)"
+        let tx = (s.transmitting || tuning) ? "\(Terminal.fg256(196))TX\(Terminal.reset)"
+                                            : "\(Terminal.fg256(46))RX\(Terminal.reset)"
         let rigLine = s.connected ? "\(mhz) MHz \(s.mode.rawValue)  \(tx)" : "no rig"
         out += Terminal.bold + Terminal.fg256(45) + " FT8-808 " + Terminal.reset
         out += Terminal.dim + " \(utc)  " + Terminal.reset
@@ -159,10 +231,21 @@ final class App {
 
         // Footer.
         out += rule(width)
-        let status = finished
-            ? "\(Terminal.fg256(244))done — \(activity.count) decode(s) over \(slotCount) slot(s)\(Terminal.reset)"
-            : "\(Terminal.dim)decoding…\(Terminal.reset)"
-        out += " \(Terminal.bold)[Q]\(Terminal.reset)uit   \(Terminal.dim)\(sourceLabel)\(Terminal.reset)   \(status)"
+        if tuning {
+            // Prominent TX banner with the live drive-level bar.
+            let bar = txLevelBar(txLevel, width: min(width - 30, 30))
+            out += " \(Terminal.bold)\(Terminal.fg256(196))● TUNE / TX\(Terminal.reset)  "
+                + "drive \(bar)  "
+                + "\(Terminal.dim)[+/-] level   [T] stop\(Terminal.reset)"
+        } else if let notice {
+            out += " \(Terminal.fg256(208))\(notice)\(Terminal.reset)"
+        } else {
+            let status = finished
+                ? "\(Terminal.fg256(244))done — \(activity.count) decode(s) over \(slotCount) slot(s)\(Terminal.reset)"
+                : "\(Terminal.dim)decoding…\(Terminal.reset)"
+            out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[T]\(Terminal.reset)une  "
+                + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)   \(status)"
+        }
 
         Terminal.write(out)
     }
@@ -210,6 +293,14 @@ final class App {
         return stops[idx]
     }
 
+    private func txLevelBar(_ v: Float, width: Int) -> String {
+        let n = Int((v * Float(width)).rounded())
+        let filled = String(repeating: "█", count: max(0, min(width, n)))
+        let empty = String(repeating: "·", count: max(0, width - n))
+        return "\(Terminal.fg256(196))\(filled)\(Terminal.dim)\(empty)\(Terminal.reset) "
+            + String(format: "%.2f", v)
+    }
+
     private func rule(_ width: Int) -> String {
         Terminal.dim + String(repeating: "─", count: min(width, 200)) + Terminal.reset + "\r\n"
     }
@@ -235,10 +326,13 @@ func usage() -> Never {
     FileHandle.standardError.write(Data("""
     usage:
       ft8term <file.wav> [--ft4] [--rig <spec>]      decode a recording
-      ft8term --live [--audio <name>] [--ft4] [--rig <spec>]   live receive
+      ft8term --live [--audio <name>] [--ft4] [--rig <spec>] [--out <name>]   live receive
       ft8term --list-audio                           list input devices
 
-      <spec> = dummy | model[,device[,baud]]   (e.g. ftdx101d via 1040,...)
+      <spec> = dummy | name-or-model[,device[,baud]]   (e.g. ftdx101d,/dev/cu...,38400)
+      --out  output device for Tune (defaults to the --audio device)
+
+    In the live view: [T] tune (key TX + steady tone, +/- to set drive), [Q] quit.
 
     """.utf8))
     exit(2)
@@ -251,6 +345,11 @@ func errExit(_ msg: String) -> Never {
 
 let args = CommandLine.arguments
 guard args.count >= 2 else { usage() }
+
+func flagValue(_ name: String) -> String? {
+    guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+    return args[i + 1]
+}
 
 // --list-audio: print input devices and exit (no terminal takeover).
 if args.contains("--list-audio") {
@@ -272,7 +371,7 @@ if args.contains("--list-audio") {
 let proto: FT8Protocol = args.contains("--ft4") ? .ft4 : .ft8
 
 // Positional args = tokens that aren't flags or flag values.
-let valueFlags: Set<String> = ["--rig", "--audio"]
+let valueFlags: Set<String> = ["--rig", "--audio", "--out", "--tune-freq"]
 var positionals: [String] = []
 do {
     var i = 1
@@ -287,15 +386,18 @@ do {
     }
 }
 
+let audioDevice = flagValue("--audio")
+// Tune output: explicit --out, else the same codec we capture from (the rig).
+let outDevice = flagValue("--out") ?? audioDevice
+let tuneFreq = Float(flagValue("--tune-freq") ?? "") ?? 1500
+
 // Decide the audio source: --live (capture) or a WAV path.
 let live = args.contains("--live")
 let source: any AudioSource
 let sourceLabel: String
 if live {
-    var device: String? = nil
-    if let i = args.firstIndex(of: "--audio"), i + 1 < args.count { device = args[i + 1] }
-    source = LiveAudioSource(device: device)
-    sourceLabel = "live: \(device ?? "default input")"
+    source = LiveAudioSource(device: audioDevice)
+    sourceLabel = "live: \(audioDevice ?? "default input")"
 } else {
     guard let path = positionals.first else { usage() }
     let wavURL = URL(fileURLWithPath: path)
@@ -319,14 +421,13 @@ func makeRig() async -> RigController {
     }
 }
 
-// Restore the terminal on Ctrl-C even if we're mid-render.
-signal(SIGINT) { _ in
-    Terminal.restore()
-    exit(0)
-}
+// On Ctrl-C / kill: drop PTT first (never leave the rig keyed), then restore.
+signal(SIGINT)  { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
+signal(SIGTERM) { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
 
 let rig = await makeRig()
 Terminal.enableRawMode()
-let app = App(source: source, label: sourceLabel, proto: proto, rig: rig)
+let app = App(source: source, label: sourceLabel, proto: proto, rig: rig,
+              outDevice: outDevice, tuneFreq: tuneFreq)
 await app.run()
 Terminal.restore()
