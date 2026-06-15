@@ -25,9 +25,9 @@ struct ActivityLine {
 @MainActor
 final class App {
     let engine: DecodeEngine
-    let source: WavFileSource
+    let source: any AudioSource
     let rig: RigController
-    let fileName: String
+    let sourceLabel: String
 
     private var spectrum: [Float] = []
     private var activity: [ActivityLine] = []
@@ -37,13 +37,13 @@ final class App {
     private var rigState = RigState(frequencyHz: 14_074_000, mode: .usb,
                                     transmitting: false, connected: true)
 
-    init(wavURL: URL, proto: FT8Protocol, rig: RigController) {
+    init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController) {
         let (rows, cols) = Terminal.size()
         _ = rows
         self.engine = DecodeEngine(proto: proto, spectrumColumns: max(20, cols - 2))
-        self.source = WavFileSource(url: wavURL)
+        self.source = source
         self.rig = rig
-        self.fileName = wavURL.lastPathComponent
+        self.sourceLabel = label
     }
 
     private let interactive = isatty(STDIN_FILENO) == 1
@@ -162,7 +162,7 @@ final class App {
         let status = finished
             ? "\(Terminal.fg256(244))done — \(activity.count) decode(s) over \(slotCount) slot(s)\(Terminal.reset)"
             : "\(Terminal.dim)decoding…\(Terminal.reset)"
-        out += " \(Terminal.bold)[Q]\(Terminal.reset)uit   \(Terminal.dim)\(fileName)\(Terminal.reset)   \(status)"
+        out += " \(Terminal.bold)[Q]\(Terminal.reset)uit   \(Terminal.dim)\(sourceLabel)\(Terminal.reset)   \(status)"
 
         Terminal.write(out)
     }
@@ -232,18 +232,79 @@ final class App {
 //                                 3073,/dev/cu.usbserial-1410,38400  (Kenwood TS-590)
 //   (omitted)                     mock rig (fixed 14.074 MHz USB)
 func usage() -> Never {
-    FileHandle.standardError.write(Data("usage: ft8term <file.wav> [--ft4] [--rig <dummy|model[,device[,baud]]>]\n".utf8))
+    FileHandle.standardError.write(Data("""
+    usage:
+      ft8term <file.wav> [--ft4] [--rig <spec>]      decode a recording
+      ft8term --live [--audio <name>] [--ft4] [--rig <spec>]   live receive
+      ft8term --list-audio                           list input devices
+
+      <spec> = dummy | model[,device[,baud]]   (e.g. ftdx101d via 1040,...)
+
+    """.utf8))
     exit(2)
+}
+
+func errExit(_ msg: String) -> Never {
+    FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
+    exit(1)
 }
 
 let args = CommandLine.arguments
 guard args.count >= 2 else { usage() }
-let wavURL = URL(fileURLWithPath: args[1])
-guard FileManager.default.fileExists(atPath: wavURL.path) else {
-    FileHandle.standardError.write(Data("error: file not found: \(wavURL.path)\n".utf8))
-    exit(1)
+
+// --list-audio: print input devices and exit (no terminal takeover).
+if args.contains("--list-audio") {
+    let devices = AudioDevices.inputDevices()
+    let defID = AudioDevices.defaultInputDeviceID()
+    if devices.isEmpty {
+        print("No audio input devices found.")
+    } else {
+        print("Audio input devices:")
+        for d in devices {
+            let star = (d.id == defID) ? " (default)" : ""
+            print("  \(d.name)  [\(d.channels) ch]\(star)\n    uid: \(d.uid)")
+        }
+        print("\nUse: ft8term --live --audio \"<name substring or uid>\"")
+    }
+    exit(0)
 }
+
 let proto: FT8Protocol = args.contains("--ft4") ? .ft4 : .ft8
+
+// Positional args = tokens that aren't flags or flag values.
+let valueFlags: Set<String> = ["--rig", "--audio"]
+var positionals: [String] = []
+do {
+    var i = 1
+    while i < args.count {
+        let a = args[i]
+        if a.hasPrefix("--") {
+            if valueFlags.contains(a) { i += 1 } // skip this flag's value
+        } else {
+            positionals.append(a)
+        }
+        i += 1
+    }
+}
+
+// Decide the audio source: --live (capture) or a WAV path.
+let live = args.contains("--live")
+let source: any AudioSource
+let sourceLabel: String
+if live {
+    var device: String? = nil
+    if let i = args.firstIndex(of: "--audio"), i + 1 < args.count { device = args[i + 1] }
+    source = LiveAudioSource(device: device)
+    sourceLabel = "live: \(device ?? "default input")"
+} else {
+    guard let path = positionals.first else { usage() }
+    let wavURL = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: wavURL.path) else {
+        errExit("file not found: \(wavURL.path)")
+    }
+    source = WavFileSource(url: wavURL)
+    sourceLabel = wavURL.lastPathComponent
+}
 
 func makeRig() async -> RigController {
     guard let i = args.firstIndex(of: "--rig"), i + 1 < args.count else {
@@ -283,6 +344,6 @@ signal(SIGINT) { _ in
 
 let rig = await makeRig()
 Terminal.enableRawMode()
-let app = App(wavURL: wavURL, proto: proto, rig: rig)
+let app = App(source: source, label: sourceLabel, proto: proto, rig: rig)
 await app.run()
 Terminal.restore()

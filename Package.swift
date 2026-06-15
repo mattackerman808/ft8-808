@@ -67,7 +67,18 @@ let package = Package(
         // Milestone 1: terminal FT8 client (SSH-friendly).
         .executableTarget(
             name: "ft8term",
-            dependencies: ["FT8Codec", "FT8808Engine", "HamlibRig"]
+            dependencies: ["FT8Codec", "FT8808Engine", "HamlibRig"],
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                // Embed an Info.plist so TCC can show a mic-permission prompt for
+                // this CLI (live capture uses AVCaptureDevice).
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/ft8term/Info.plist",
+                ]),
+            ]
         ),
         // Rig-control diagnostics.
         .executableTarget(

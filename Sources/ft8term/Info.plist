@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.808.ft8term</string>
+    <key>CFBundleName</key>
+    <string>ft8term</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>FT8-808 captures receiver audio from your radio to decode FT8 signals.</string>
+</dict>
+</plist>

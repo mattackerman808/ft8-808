@@ -18,7 +18,12 @@ macOS app later. See [architecture.md](architecture.md).
       streaming per-slot `SlotResult`s, vDSP `Spectrum`, `RigController` (+ mock).
 - [x] `ft8term`: raw-mode ANSI TUI — status line, color spectrum/waterfall,
       scrolling band-activity log. Interactive (TTY) and batch (piped) modes.
-- [ ] Live `AVAudioEngine` capture source → 12 kHz mono, UTC 15 s slot alignment.
+- [x] Live `AVAudioEngine` capture source → resample to 12 kHz mono, UTC 15 s
+      slot alignment (`SlotAccumulator`, unit-tested), CoreAudio device picker.
+- [x] `ft8term --live [--audio <name>]` and `--list-audio`; embedded Info.plist
+      so the CLI can prompt for mic permission.
+- [ ] Verify live decode end-to-end on the FTDX-101D's USB codec (run + grant
+      mic permission — `--audio "USB AUDIO"`).
 - [ ] NTP / clock-offset display (warn when drift exceeds slot tolerance).
 - [ ] Scrolling (time-axis) waterfall once audio is live, not just per-slot.
 
