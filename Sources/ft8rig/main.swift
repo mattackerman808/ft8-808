@@ -135,6 +135,32 @@ case "ptt":
     } catch { die("error: \(error)") }
     await rig.close()
 
+case "ptttest":
+    // Safe momentary keying: key ON, confirm, then ALWAYS key OFF before closing
+    // (so the rig can never be left transmitting).
+    let rig = parseRigSpec(args)
+    await openOrDie(rig)
+    do {
+        print("keying TX…")
+        try await rig.setPTT(true)
+        let on = await rig.state()
+        print("  PTT on  -> \(formatState(on))")
+        try await Task.sleep(nanoseconds: 800_000_000)
+        try await rig.setPTT(false)
+        let off = await rig.state()
+        print("  PTT off -> \(formatState(off))")
+        if on.transmitting && !off.transmitting {
+            print("PTT keying verified ✓")
+        } else {
+            print("WARNING: PTT did not toggle as expected — check the rig is in RX now.")
+        }
+    } catch {
+        // Best-effort un-key on any failure.
+        try? await rig.setPTT(false)
+        die("error: \(error)")
+    }
+    await rig.close()
+
 default:
     usage()
 }
