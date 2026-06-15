@@ -53,15 +53,20 @@ int ft8808_rig_set_ptt(ft8808_rig* r, int on);
 // supplied that reading. `alc` is the rig's ALC level (≈0 means no ALC action);
 // `power_watts` is forward power; `power_pct` is 0..1 of max; `swr` is SWR.
 typedef struct {
-    int   has_power_watts; float power_watts;
-    int   has_power_pct;   float power_pct;
-    int   has_alc;         float alc;
-    int   has_swr;         float swr;
+    int   has_power_watts;  float power_watts;
+    int   has_power_pct;    float power_pct;
+    int   has_alc;          float alc;
+    int   has_swr;          float swr;
+    int   has_rfpower_set;  float rfpower_set; // RF PWR ceiling setting, 0..1
 } ft8808_meters;
 
 // Read TX meters. Returns 0 on success (individual has_* flags say what was
 // available), or a negative Hamlib error code.
 int ft8808_rig_get_meters(ft8808_rig* r, ft8808_meters* out);
+
+// Get/set the rig's RF power ceiling (0..1 of max). Returns 0 on success.
+int ft8808_rig_get_rf_power(ft8808_rig* r, float* out);
+int ft8808_rig_set_rf_power(ft8808_rig* r, float frac);
 
 // Human-readable text for a Hamlib error code.
 const char* ft8808_rig_strerror(int errcode);

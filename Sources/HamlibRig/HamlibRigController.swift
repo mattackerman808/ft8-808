@@ -125,7 +125,20 @@ public actor HamlibRigController: RigController {
             powerWatts: m.has_power_watts != 0 ? m.power_watts : nil,
             powerPercent: m.has_power_pct != 0 ? m.power_pct : nil,
             alc: m.has_alc != 0 ? m.alc : nil,
-            swr: m.has_swr != 0 ? m.swr : nil)
+            swr: m.has_swr != 0 ? m.swr : nil,
+            powerSetPercent: m.has_rfpower_set != 0 ? m.rfpower_set : nil)
+    }
+
+    /// The rig's RF power ceiling setting (0…1 of max).
+    public func rfPower() async -> Float? {
+        guard let handle else { return nil }
+        var v: Float = 0
+        return ft8808_rig_get_rf_power(handle.ptr, &v) == 0 ? v : nil
+    }
+
+    public func setRFPower(_ fraction: Float) async throws {
+        guard let handle else { throw HamlibError.notOpen }
+        try check("set RF power", ft8808_rig_set_rf_power(handle.ptr, max(0, min(1, fraction))))
     }
 
     // MARK: Helpers

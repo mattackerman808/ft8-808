@@ -138,7 +138,25 @@ int ft8808_rig_get_meters(ft8808_rig* r, ft8808_meters* out) {
     if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_SWR, &v) == RIG_OK) {
         out->has_swr = 1; out->swr = v.f;
     }
+    if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_RFPOWER, &v) == RIG_OK) {
+        out->has_rfpower_set = 1; out->rfpower_set = v.f;
+    }
     return RIG_OK;
+}
+
+int ft8808_rig_get_rf_power(ft8808_rig* r, float* out) {
+    if (r == NULL || r->rig == NULL || out == NULL) return -RIG_EINVAL;
+    value_t v;
+    int rc = rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_RFPOWER, &v);
+    if (rc == RIG_OK) *out = v.f;
+    return rc;
+}
+
+int ft8808_rig_set_rf_power(ft8808_rig* r, float frac) {
+    if (r == NULL || r->rig == NULL) return -RIG_EINVAL;
+    value_t v;
+    v.f = frac;
+    return rig_set_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_RFPOWER, v);
 }
 
 const char* ft8808_rig_strerror(int errcode) {

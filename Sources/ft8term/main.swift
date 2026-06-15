@@ -47,6 +47,7 @@ final class App {
     private var lastMeters: RigMeters?
     private var meterTask: Task<Void, Never>?
     private var notice: String?
+    private var autoTuning = false
 
     private static func amplitude(fromDb db: Float) -> Float {
         db <= -90 ? 0 : pow(10, db / 20)
@@ -142,9 +143,11 @@ final class App {
         case UInt8(ascii: "t"), UInt8(ascii: "T"):
             toggleTune()
         case UInt8(ascii: "+"), UInt8(ascii: "="):
-            if tuning { setLevelDb(txLevelDb + 1) }
+            if tuning && !autoTuning { setLevelDb(txLevelDb + 1) }
         case UInt8(ascii: "-"), UInt8(ascii: "_"):
-            if tuning { setLevelDb(txLevelDb - 1) }
+            if tuning && !autoTuning { setLevelDb(txLevelDb - 1) }
+        case UInt8(ascii: "a"), UInt8(ascii: "A"):
+            if !autoTuning { Task { await autoTune() } }
         default:
             break
         }
@@ -217,6 +220,63 @@ final class App {
         render()
     }
 
+    /// Sweep the drive up from a low level until ALC just deflects (or output
+    /// power plateaus), then settle at the highest clean level — the max-power,
+    /// no-ALC knee. Requires a rig that reports ALC/power over CAT.
+    private func autoTune() async {
+        guard !autoTuning, !tuneBusy else { return }
+
+        // Make sure we're transmitting a tone first.
+        if !tuning { await startTune(); guard tuning else { return } }
+
+        // Need ALC readback to find the knee.
+        guard let probe = await rig.meters(), probe.alc != nil || probe.powerWatts != nil else {
+            notice = "auto-tune needs rig ALC/power over CAT (not reported)"
+            render()
+            return
+        }
+
+        autoTuning = true
+        defer { autoTuning = false }
+
+        let alcThreshold: Float = 0.1   // refine once we see real FTDX-101D values
+        let startDb: Float = -50
+        var bestDb = startDb
+        var bestPower: Float = 0
+        var plateau = 0
+        var db = startDb
+
+        while db <= 0 {
+            if !tuning || Task.isCancelled { break }
+            setLevelDb(db)
+            try? await Task.sleep(nanoseconds: 350_000_000) // let the rig settle
+            let m = await rig.meters()
+            lastMeters = m
+            let alc = m?.alc ?? 0
+            let power = m?.powerWatts ?? ((m?.powerPercent ?? 0) * 100)
+            render()
+
+            if alc > alcThreshold {           // overdrive onset → previous step was the knee
+                break
+            }
+            if power <= bestPower + 0.5 {      // no more power to be had (ceiling)
+                plateau += 1
+                if plateau >= 2 { break }
+            } else {
+                plateau = 0
+                bestDb = db
+                bestPower = power
+            }
+            db += 1
+        }
+
+        setLevelDb(bestDb)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        lastMeters = await rig.meters()
+        notice = String(format: "auto-tune → %.0f dBFS (≈%.0f W, ALC clean)", bestDb, bestPower)
+        render()
+    }
+
     // ---- Rendering -----------------------------------------------------------
     private func render() {
         let (rows, cols) = Terminal.size()
@@ -257,12 +317,15 @@ final class App {
         if tuning {
             // Prominent TX banner: drive level (dB) + live rig meters.
             let amp = Self.amplitude(fromDb: txLevelDb)
-            out += " \(Terminal.bold)\(Terminal.fg256(196))● TUNE/TX\(Terminal.reset)  "
+            let label = autoTuning
+                ? "\(Terminal.fg256(45))⟳ AUTO-TUNE\(Terminal.reset)"
+                : "\(Terminal.fg256(196))● TUNE/TX\(Terminal.reset)"
+            out += " \(Terminal.bold)\(label)\(Terminal.reset)  "
                 + "drive \(dbBar(txLevelDb, width: 14)) "
                 + String(format: "%+.0f dBFS ", txLevelDb)
                 + "\(Terminal.dim)(amp \(String(format: "%.3f", amp)))\(Terminal.reset)  "
                 + meterText()
-                + "  \(Terminal.dim)[+/-] [T]stop\(Terminal.reset)"
+                + "  \(Terminal.dim)[+/-] [A]uto [T]stop\(Terminal.reset)"
         } else if let notice {
             out += " \(Terminal.fg256(208))\(notice)\(Terminal.reset)"
         } else {
@@ -335,6 +398,7 @@ final class App {
         var parts: [String] = []
         if let w = m.powerWatts { parts.append("PWR \(Int(w.rounded()))W") }
         else if let p = m.powerPercent { parts.append("PWR \(Int((p * 100).rounded()))%") }
+        if let set = m.powerSetPercent { parts.append("\(Terminal.dim)SET \(Int((set * 100).rounded()))%\(Terminal.reset)") }
         if let a = m.alc {
             let col = a > 0.05 ? Terminal.fg256(196) : Terminal.fg256(46)
             parts.append("\(col)ALC \(String(format: "%.2f", a))\(Terminal.reset)")

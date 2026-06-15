@@ -60,7 +60,11 @@ macOS app later. See [architecture.md](architecture.md).
 - [x] Tune built into the app (`ft8term`): press `T` to key PTT + play a steady
       tone, `+/-` to set drive, `T` to stop — WSJT-X-style calibration. Emergency
       un-key on Ctrl-C/SIGTERM and on quit. (No separate binary.)
-- [ ] Verify tune on-air: set drive for full rated power with NO ALC (dummy load).
+- [x] Tune drive in dBFS (fine 1 dB steps); live CAT meters in the banner
+      (PWR / ALC / SWR / RF-PWR-ceiling); ALC reddens on deflection.
+- [x] Auto-tune (`A`): sweeps drive to the max-power / no-ALC knee using the CAT
+      meters. (ALC threshold needs calibration against real FTDX-101D values.)
+- [ ] Verify tune/auto-tune on-air; persist the calibrated drive level.
 - [ ] On-air FT8 TX: play synthesized slot audio with PTT at the UTC boundary.
 - [ ] Close the loop: complete an automated QSO from `ft8term`.
 

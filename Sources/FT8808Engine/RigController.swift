@@ -26,16 +26,18 @@ public struct RigState: Sendable, Equatable {
 /// doesn't report them. `alc ≈ 0` means no ALC action (the goal when tuning).
 public struct RigMeters: Sendable, Equatable {
     public var powerWatts: Float?
-    public var powerPercent: Float?  // 0…1 of max
+    public var powerPercent: Float?    // measured output, 0…1 of max
     public var alc: Float?
     public var swr: Float?
+    public var powerSetPercent: Float? // RF PWR ceiling SETTING, 0…1
 
     public init(powerWatts: Float? = nil, powerPercent: Float? = nil,
-                alc: Float? = nil, swr: Float? = nil) {
+                alc: Float? = nil, swr: Float? = nil, powerSetPercent: Float? = nil) {
         self.powerWatts = powerWatts
         self.powerPercent = powerPercent
         self.alc = alc
         self.swr = swr
+        self.powerSetPercent = powerSetPercent
     }
 }
 
