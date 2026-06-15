@@ -299,7 +299,12 @@ final class App {
         try? await Task.sleep(nanoseconds: 300_000_000)
         lastMeters = await rig.meters()
         let finalPower = power(lastMeters)
-        notice = String(format: "auto-tune → %+.0f dBFS  ≈%.0f W  ALC %.2f", knee, finalPower, resultAlc)
+
+        // Calibration done — stop transmitting. The drive level (txLevelDb) is
+        // kept for the next tune / transmit.
+        await stopTune()
+        notice = String(format: "auto-tune → %+.0f dBFS  ≈%.0f W  ALC %.2f  (TX off)",
+                        knee, finalPower, resultAlc)
         render()
     }
 
