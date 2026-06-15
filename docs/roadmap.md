@@ -22,10 +22,17 @@ macOS app later. See [architecture.md](architecture.md).
 - [ ] NTP / clock-offset display (warn when drift exceeds slot tolerance).
 - [ ] Scrolling (time-axis) waterfall once audio is live, not just per-slot.
 
-## Milestone 2 — Rig control (Hamlib)
-- [ ] `CHamlib` system-library target; `HamlibRigController` implementing
-      `RigController` (freq read/set, mode, PTT).
-- [ ] Rig picker / serial config; surface live freq+mode in the TUI status line.
+## Milestone 2 — Rig control (Hamlib) — bundled
+- [x] Bundle Hamlib 4.7.1 (LGPL) as a relocatable `Hamlib.xcframework` via
+      `Scripts/build-hamlib.sh` — **no `brew install` for end users**. Dylib is
+      self-contained (only `/usr/lib/libSystem`), `@rpath`-linked.
+- [x] `CHamlib` C shim + `HamlibRigController` (actor) implementing
+      `RigController`: open, get/set freq, mode, PTT.
+- [x] Verified end-to-end against Hamlib's software dummy rig (no hardware).
+- [x] `ft8term --rig <dummy|model[,device[,baud]]>`; live status-line polling.
+- [ ] Universal (arm64 + x86_64) dylib: `ARCHS="arm64 x86_64" build-hamlib.sh`.
+- [ ] Verify against a real radio (needs hardware); rig picker UI.
+- [ ] Code-sign the bundled dylib for notarised distribution.
 
 ## Milestone 3 — QSO logic + logging
 - [ ] Message parsing into structured fields (call_to / call_de / grid / report).

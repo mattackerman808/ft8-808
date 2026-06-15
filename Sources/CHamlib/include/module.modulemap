@@ -1,0 +1,4 @@
+module CHamlib {
+    header "ft8808_hamlib.h"
+    export *
+}

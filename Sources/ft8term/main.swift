@@ -1,6 +1,7 @@
 import Foundation
 import FT8Codec
 import FT8808Engine
+import HamlibRig
 #if canImport(Glibc)
 import Glibc
 #else
@@ -36,12 +37,12 @@ final class App {
     private var rigState = RigState(frequencyHz: 14_074_000, mode: .usb,
                                     transmitting: false, connected: true)
 
-    init(wavURL: URL, proto: FT8Protocol) {
+    init(wavURL: URL, proto: FT8Protocol, rig: RigController) {
         let (rows, cols) = Terminal.size()
         _ = rows
         self.engine = DecodeEngine(proto: proto, spectrumColumns: max(20, cols - 2))
         self.source = WavFileSource(url: wavURL)
-        self.rig = MockRigController()
+        self.rig = rig
         self.fileName = wavURL.lastPathComponent
     }
 
@@ -49,7 +50,7 @@ final class App {
 
     func run() async {
         rigState = await rig.state()
-        if interactive { startKeyReader() }
+        if interactive { startKeyReader(); startRigPoll() }
         render()
         let engine = self.engine      // Sendable structs — safe to capture.
         let source = self.source
@@ -81,6 +82,20 @@ final class App {
         // In non-interactive/batch mode there is no key to wait for: exit once
         // the source is exhausted.
         if !interactive { quit?.resume(); quit = nil }
+    }
+
+    /// Refresh the rig status line once a second so a real rig's freq/mode/PTT
+    /// stay current.
+    private func startRigPoll() {
+        let rig = self.rig
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let s = await rig.state()
+                guard let self else { return }
+                if s != self.rigState { self.rigState = s; self.render() }
+            }
+        }
     }
 
     private func startKeyReader() {
@@ -208,11 +223,21 @@ final class App {
 }
 
 // ---- Entry point -------------------------------------------------------------
-let args = CommandLine.arguments
-guard args.count >= 2 else {
-    FileHandle.standardError.write(Data("usage: ft8term <file.wav> [--ft4]\n".utf8))
+//
+//   ft8term <file.wav> [--ft4] [--rig <spec>]
+//
+// --rig specs:
+//   dummy                         Hamlib software-simulated rig (bundled)
+//   <model>[,<device>[,<baud>]]   any Hamlib model number, e.g.
+//                                 3073,/dev/cu.usbserial-1410,38400  (Kenwood TS-590)
+//   (omitted)                     mock rig (fixed 14.074 MHz USB)
+func usage() -> Never {
+    FileHandle.standardError.write(Data("usage: ft8term <file.wav> [--ft4] [--rig <dummy|model[,device[,baud]]>]\n".utf8))
     exit(2)
 }
+
+let args = CommandLine.arguments
+guard args.count >= 2 else { usage() }
 let wavURL = URL(fileURLWithPath: args[1])
 guard FileManager.default.fileExists(atPath: wavURL.path) else {
     FileHandle.standardError.write(Data("error: file not found: \(wavURL.path)\n".utf8))
@@ -220,13 +245,44 @@ guard FileManager.default.fileExists(atPath: wavURL.path) else {
 }
 let proto: FT8Protocol = args.contains("--ft4") ? .ft4 : .ft8
 
+func makeRig() async -> RigController {
+    guard let i = args.firstIndex(of: "--rig"), i + 1 < args.count else {
+        return MockRigController()
+    }
+    let spec = args[i + 1]
+    let model: Int
+    var device: String? = nil
+    var baud = 0
+    if spec == "dummy" {
+        model = HamlibModel.dummy
+    } else {
+        let parts = spec.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        guard let m = Int(parts[0]) else {
+            FileHandle.standardError.write(Data("error: bad --rig model: \(parts[0])\n".utf8))
+            exit(1)
+        }
+        model = m
+        if parts.count > 1, !parts[1].isEmpty { device = parts[1] }
+        if parts.count > 2, let b = Int(parts[2]) { baud = b }
+    }
+    let rig = HamlibRigController(model: model, device: device, serialSpeed: baud)
+    do {
+        try await rig.open()
+    } catch {
+        FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+        exit(1)
+    }
+    return rig
+}
+
 // Restore the terminal on Ctrl-C even if we're mid-render.
 signal(SIGINT) { _ in
     Terminal.restore()
     exit(0)
 }
 
+let rig = await makeRig()
 Terminal.enableRawMode()
-let app = App(wavURL: wavURL, proto: proto)
+let app = App(wavURL: wavURL, proto: proto, rig: rig)
 await app.run()
 Terminal.restore()

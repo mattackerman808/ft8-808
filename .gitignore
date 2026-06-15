@@ -28,3 +28,7 @@ Package.resolved
 *.log
 *.adi
 scratch/
+
+# Hamlib build working dir (the packaged Vendor/Hamlib.xcframework IS committed)
+.hamlib-build/
+.hamlib-build.out
