@@ -121,6 +121,26 @@ int ft8808_rig_set_ptt(ft8808_rig* r, int on) {
     return rig_set_ptt(r->rig, RIG_VFO_CURR, on ? RIG_PTT_ON : RIG_PTT_OFF);
 }
 
+int ft8808_rig_get_meters(ft8808_rig* r, ft8808_meters* out) {
+    if (r == NULL || r->rig == NULL || out == NULL) return -RIG_EINVAL;
+    memset(out, 0, sizeof(*out));
+
+    value_t v;
+    if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_RFPOWER_METER_WATTS, &v) == RIG_OK) {
+        out->has_power_watts = 1; out->power_watts = v.f;
+    }
+    if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_RFPOWER_METER, &v) == RIG_OK) {
+        out->has_power_pct = 1; out->power_pct = v.f;
+    }
+    if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_ALC, &v) == RIG_OK) {
+        out->has_alc = 1; out->alc = v.f;
+    }
+    if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_SWR, &v) == RIG_OK) {
+        out->has_swr = 1; out->swr = v.f;
+    }
+    return RIG_OK;
+}
+
 const char* ft8808_rig_strerror(int errcode) {
     return rigerror(errcode);
 }

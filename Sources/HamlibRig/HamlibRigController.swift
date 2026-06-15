@@ -117,6 +117,17 @@ public actor HamlibRigController: RigController {
         try check("set PTT", ft8808_rig_set_ptt(handle.ptr, on ? 1 : 0))
     }
 
+    public func meters() async -> RigMeters? {
+        guard let handle else { return nil }
+        var m = ft8808_meters()
+        guard ft8808_rig_get_meters(handle.ptr, &m) == 0 else { return nil }
+        return RigMeters(
+            powerWatts: m.has_power_watts != 0 ? m.power_watts : nil,
+            powerPercent: m.has_power_pct != 0 ? m.power_pct : nil,
+            alc: m.has_alc != 0 ? m.alc : nil,
+            swr: m.has_swr != 0 ? m.swr : nil)
+    }
+
     // MARK: Helpers
 
     private func check(_ op: String, _ rc: Int32) throws {

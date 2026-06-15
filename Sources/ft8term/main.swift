@@ -43,8 +43,14 @@ final class App {
     private var tx: TxAudioOutput?
     private var tuning = false
     private var tuneBusy = false        // guards async start/stop transitions
-    private var txLevel: Float = 0.05
+    private var txLevelDb: Float = -40  // audio drive in dBFS (fine control)
+    private var lastMeters: RigMeters?
+    private var meterTask: Task<Void, Never>?
     private var notice: String?
+
+    private static func amplitude(fromDb db: Float) -> Float {
+        db <= -90 ? 0 : pow(10, db / 20)
+    }
 
     init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController,
          outDevice: String?, tuneFreq: Float = 1500) {
@@ -77,6 +83,7 @@ final class App {
             self.quit = c
         }
         // Always leave the rig in receive on the way out.
+        meterTask?.cancel(); meterTask = nil
         tx?.stop(); tx = nil
         if tuning { try? await rig.setPTT(false); tuning = false }
         consume.cancel()
@@ -135,9 +142,9 @@ final class App {
         case UInt8(ascii: "t"), UInt8(ascii: "T"):
             toggleTune()
         case UInt8(ascii: "+"), UInt8(ascii: "="):
-            if tuning { setLevel(txLevel + 0.02) }
+            if tuning { setLevelDb(txLevelDb + 1) }
         case UInt8(ascii: "-"), UInt8(ascii: "_"):
-            if tuning { setLevel(txLevel - 0.02) }
+            if tuning { setLevelDb(txLevelDb - 1) }
         default:
             break
         }
@@ -157,7 +164,7 @@ final class App {
         defer { tuneBusy = false }
 
         let out = TxAudioOutput(frequencyHz: tuneFreq, device: outDevice)
-        out.amplitude = txLevel
+        out.amplitude = Self.amplitude(fromDb: txLevelDb)
         do {
             try out.start()
             try await rig.setPTT(true)
@@ -172,6 +179,7 @@ final class App {
         tuning = true
         rigState.transmitting = true
         notice = nil
+        startMeterPoll()
         render()
     }
 
@@ -180,6 +188,8 @@ final class App {
         tuneBusy = true
         defer { tuneBusy = false }
 
+        meterTask?.cancel(); meterTask = nil
+        lastMeters = nil
         tx?.stop()
         tx = nil
         try? await rig.setPTT(false)
@@ -188,9 +198,22 @@ final class App {
         render()
     }
 
-    private func setLevel(_ v: Float) {
-        txLevel = max(0, min(1, v))
-        tx?.amplitude = txLevel
+    /// Poll the rig's TX meters a few times a second while tuning.
+    private func startMeterPoll() {
+        let rig = self.rig
+        meterTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let m = await rig.meters()
+                guard let self else { return }
+                if m != self.lastMeters { self.lastMeters = m; self.render() }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
+    private func setLevelDb(_ db: Float) {
+        txLevelDb = max(-60, min(0, db))
+        tx?.amplitude = Self.amplitude(fromDb: txLevelDb)
         render()
     }
 
@@ -232,11 +255,14 @@ final class App {
         // Footer.
         out += rule(width)
         if tuning {
-            // Prominent TX banner with the live drive-level bar.
-            let bar = txLevelBar(txLevel, width: min(width - 30, 30))
-            out += " \(Terminal.bold)\(Terminal.fg256(196))● TUNE / TX\(Terminal.reset)  "
-                + "drive \(bar)  "
-                + "\(Terminal.dim)[+/-] level   [T] stop\(Terminal.reset)"
+            // Prominent TX banner: drive level (dB) + live rig meters.
+            let amp = Self.amplitude(fromDb: txLevelDb)
+            out += " \(Terminal.bold)\(Terminal.fg256(196))● TUNE/TX\(Terminal.reset)  "
+                + "drive \(dbBar(txLevelDb, width: 14)) "
+                + String(format: "%+.0f dBFS ", txLevelDb)
+                + "\(Terminal.dim)(amp \(String(format: "%.3f", amp)))\(Terminal.reset)  "
+                + meterText()
+                + "  \(Terminal.dim)[+/-] [T]stop\(Terminal.reset)"
         } else if let notice {
             out += " \(Terminal.fg256(208))\(notice)\(Terminal.reset)"
         } else {
@@ -293,12 +319,28 @@ final class App {
         return stops[idx]
     }
 
-    private func txLevelBar(_ v: Float, width: Int) -> String {
-        let n = Int((v * Float(width)).rounded())
-        let filled = String(repeating: "█", count: max(0, min(width, n)))
-        let empty = String(repeating: "·", count: max(0, width - n))
-        return "\(Terminal.fg256(196))\(filled)\(Terminal.dim)\(empty)\(Terminal.reset) "
-            + String(format: "%.2f", v)
+    /// Bar for the drive level mapped over −60…0 dBFS.
+    private func dbBar(_ db: Float, width: Int) -> String {
+        let frac = max(0, min(1, (db + 60) / 60))
+        let n = Int((frac * Float(width)).rounded())
+        return Terminal.fg256(45) + "["
+            + String(repeating: "█", count: n)
+            + Terminal.dim + String(repeating: "·", count: max(0, width - n))
+            + Terminal.reset + Terminal.fg256(45) + "]" + Terminal.reset
+    }
+
+    /// Live rig TX meters; ALC turns red once it deflects (the overdrive cue).
+    private func meterText() -> String {
+        guard let m = lastMeters else { return "\(Terminal.dim)meters n/a\(Terminal.reset)" }
+        var parts: [String] = []
+        if let w = m.powerWatts { parts.append("PWR \(Int(w.rounded()))W") }
+        else if let p = m.powerPercent { parts.append("PWR \(Int((p * 100).rounded()))%") }
+        if let a = m.alc {
+            let col = a > 0.05 ? Terminal.fg256(196) : Terminal.fg256(46)
+            parts.append("\(col)ALC \(String(format: "%.2f", a))\(Terminal.reset)")
+        }
+        if let s = m.swr { parts.append("SWR \(String(format: "%.1f", s))") }
+        return parts.isEmpty ? "\(Terminal.dim)no meters\(Terminal.reset)" : parts.joined(separator: "  ")
     }
 
     private func rule(_ width: Int) -> String {

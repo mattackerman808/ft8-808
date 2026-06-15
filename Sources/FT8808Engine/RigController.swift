@@ -22,6 +22,23 @@ public struct RigState: Sendable, Equatable {
     }
 }
 
+/// Transmit meters read from the rig over CAT. Values are `nil` when the rig
+/// doesn't report them. `alc ≈ 0` means no ALC action (the goal when tuning).
+public struct RigMeters: Sendable, Equatable {
+    public var powerWatts: Float?
+    public var powerPercent: Float?  // 0…1 of max
+    public var alc: Float?
+    public var swr: Float?
+
+    public init(powerWatts: Float? = nil, powerPercent: Float? = nil,
+                alc: Float? = nil, swr: Float? = nil) {
+        self.powerWatts = powerWatts
+        self.powerPercent = powerPercent
+        self.alc = alc
+        self.swr = swr
+    }
+}
+
 /// Abstraction over rig control (CAT + PTT). The real implementation will wrap
 /// Hamlib; this protocol keeps the engine and TUI independent of it so the app
 /// runs against a mock today and a radio later.
@@ -30,6 +47,12 @@ public protocol RigController: Sendable {
     func setFrequency(_ hz: Int) async throws
     func setMode(_ mode: RigMode) async throws
     func setPTT(_ on: Bool) async throws
+    /// TX meters (power/ALC/SWR), or `nil` if unsupported.
+    func meters() async -> RigMeters?
+}
+
+public extension RigController {
+    func meters() async -> RigMeters? { nil }
 }
 
 /// A stand-in rig for development: fixed on the 20 m FT8 watering hole.

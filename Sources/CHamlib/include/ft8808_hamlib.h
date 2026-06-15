@@ -49,6 +49,20 @@ int ft8808_rig_set_freq(ft8808_rig* r, double hz);   // 0 ok, else Hamlib error
 int ft8808_rig_set_mode(ft8808_rig* r, ft8808_mode mode);
 int ft8808_rig_set_ptt(ft8808_rig* r, int on);
 
+// Transmit meters read over CAT. Each `has_*` flag indicates whether the rig
+// supplied that reading. `alc` is the rig's ALC level (≈0 means no ALC action);
+// `power_watts` is forward power; `power_pct` is 0..1 of max; `swr` is SWR.
+typedef struct {
+    int   has_power_watts; float power_watts;
+    int   has_power_pct;   float power_pct;
+    int   has_alc;         float alc;
+    int   has_swr;         float swr;
+} ft8808_meters;
+
+// Read TX meters. Returns 0 on success (individual has_* flags say what was
+// available), or a negative Hamlib error code.
+int ft8808_rig_get_meters(ft8808_rig* r, ft8808_meters* out);
+
 // Human-readable text for a Hamlib error code.
 const char* ft8808_rig_strerror(int errcode);
 
