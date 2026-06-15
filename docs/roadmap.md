@@ -30,9 +30,13 @@ macOS app later. See [architecture.md](architecture.md).
       `RigController`: open, get/set freq, mode, PTT.
 - [x] Verified end-to-end against Hamlib's software dummy rig (no hardware).
 - [x] `ft8term --rig <dummy|model[,device[,baud]]>`; live status-line polling.
+- [x] `ft8rig` diagnostic CLI (ports / probe / setfreq / setmode / ptt) with
+      named-rig aliases.
+- [x] Verified on real hardware — Yaesu FTDX-101D (model 1040, 38400 baud):
+      CAT read + set-frequency + set-mode all clean. PTT keying still to test
+      (needs dummy load).
 - [ ] Universal (arm64 + x86_64) dylib: `ARCHS="arm64 x86_64" build-hamlib.sh`.
-- [ ] Verify against a real radio (needs hardware); rig picker UI.
-- [ ] Code-sign the bundled dylib for notarised distribution.
+- [ ] Rig picker UI; code-sign the bundled dylib for notarised distribution.
 
 ## Milestone 3 — QSO logic + logging
 - [ ] Message parsing into structured fields (call_to / call_de / grid / report).
