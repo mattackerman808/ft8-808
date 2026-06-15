@@ -9,14 +9,21 @@ public struct AudioInputDevice: Sendable, Identifiable {
     public let channels: Int
 }
 
-/// Enumeration + lookup of CoreAudio input devices, so the user can pick the
-/// rig's audio interface rather than the Mac's built-in microphone.
+/// Enumeration + lookup of CoreAudio devices, so the user can pick the rig's
+/// audio interface for capture (input) and transmit (output).
 public enum AudioDevices {
 
-    /// All devices that have at least one input channel.
-    public static func inputDevices() -> [AudioInputDevice] {
+    public enum Scope {
+        case input, output
+        var coreAudio: AudioObjectPropertyScope {
+            self == .input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput
+        }
+    }
+
+    /// All devices that have at least one channel in the given scope.
+    public static func devices(scope: Scope) -> [AudioInputDevice] {
         deviceIDs().compactMap { id in
-            let ch = inputChannelCount(id)
+            let ch = channelCount(id, scope: scope)
             guard ch > 0 else { return nil }
             return AudioInputDevice(
                 id: id,
@@ -25,6 +32,12 @@ public enum AudioDevices {
                 channels: ch)
         }
     }
+
+    /// All devices with at least one input channel.
+    public static func inputDevices() -> [AudioInputDevice] { devices(scope: .input) }
+
+    /// All devices with at least one output channel.
+    public static func outputDevices() -> [AudioInputDevice] { devices(scope: .output) }
 
     /// The system default input device, if any.
     public static func defaultInputDeviceID() -> AudioDeviceID? {
@@ -38,12 +51,13 @@ public enum AudioDevices {
         return (st == noErr && dev != 0) ? dev : nil
     }
 
-    /// Find an input device by exact UID, or case-insensitive name substring.
-    public static func find(_ query: String) -> AudioInputDevice? {
-        let devices = inputDevices()
-        if let exact = devices.first(where: { $0.uid == query }) { return exact }
+    /// Find a device by exact UID, or case-insensitive name substring, in the
+    /// given scope (default input).
+    public static func find(_ query: String, scope: Scope = .input) -> AudioInputDevice? {
+        let list = devices(scope: scope)
+        if let exact = list.first(where: { $0.uid == query }) { return exact }
         let q = query.lowercased()
-        return devices.first { $0.name.lowercased().contains(q) }
+        return list.first { $0.name.lowercased().contains(q) }
     }
 
     // MARK: - CoreAudio plumbing
@@ -63,10 +77,10 @@ public enum AudioDevices {
         return ids
     }
 
-    private static func inputChannelCount(_ id: AudioDeviceID) -> Int {
+    private static func channelCount(_ id: AudioDeviceID, scope: Scope) -> Int {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioObjectPropertyScopeInput,
+            mScope: scope.coreAudio,
             mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size > 0 else { return 0 }

@@ -55,8 +55,12 @@ macOS app later. See [architecture.md](architecture.md).
       `transmitAudio` GFSK waveform synthesis (reference ft8_lib algorithm).
 - [x] Proven offline: encode → synth → decode round-trips for CQ / report /
       RR73 at multiple audio offsets (no RF).
-- [ ] Audio OUTPUT to the rig's USB codec (AVAudioEngine output node).
-- [ ] On-air TX: key PTT at the UTC boundary, play the slot, un-key (dummy load).
+- [x] Audio OUTPUT path: `TxAudioOutput` (AVAudioEngine output node + device
+      selection) and `ToneGenerator` (pure, unit-tested).
+- [x] `ft8tune` — transmit-audio calibration like WSJT-X Tune: keys PTT, plays a
+      steady tone, live level adjust; emergency un-key on Ctrl-C (signal handler).
+- [ ] Verify tune on-air: set drive for full rated power with NO ALC (dummy load).
+- [ ] On-air FT8 TX: play synthesized slot audio with PTT at the UTC boundary.
 - [ ] Close the loop: complete an automated QSO from `ft8term`.
 
 ## Milestone 5 — macOS app

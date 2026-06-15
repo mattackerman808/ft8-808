@@ -65,11 +65,23 @@ public actor HamlibRigController: RigController {
             throw HamlibError.openFailed(code: err, message: Self.message(err))
         }
         handle = RigHandle(h)
+        Self.panicHandle = h
     }
 
     /// Closes the rig. Releasing the controller also closes it automatically.
     public func close() {
+        Self.panicHandle = nil
         handle = nil // RigHandle.deinit performs the C close
+    }
+
+    /// Best-effort synchronous PTT-off for use from a signal handler (e.g. when
+    /// Ctrl-C interrupts tune/transmit). Not strictly async-signal-safe, but far
+    /// safer than leaving the transmitter keyed. Points at the most recently
+    /// opened rig while it is open.
+    nonisolated(unsafe) private static var panicHandle: OpaquePointer?
+
+    public static func panicUnkey() {
+        if let h = panicHandle { _ = ft8808_rig_set_ptt(h, 0) }
     }
 
     // MARK: RigController
