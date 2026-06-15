@@ -34,8 +34,9 @@ macOS app later. See [architecture.md](architecture.md).
       named-rig aliases.
 - [x] Verified on real hardware — Yaesu FTDX-101D (model 1040, 38400 baud):
       CAT read, set-frequency, set-mode, and momentary PTT keying all confirmed.
-- [ ] Revisit mode reporting: FTDX-101D DATA-U vs PKTUSB mapping (read showed
-      USB after setting DATA).
+- [ ] Make FT8 operating mode configurable per rig (do NOT hardcode DATA): on
+      the FTDX-101D, DATA-U engages the narrow 600 Hz roofing filter and breaks
+      FT8's wide passband — USB is the right mode there.
 - [ ] Universal (arm64 + x86_64) dylib: `ARCHS="arm64 x86_64" build-hamlib.sh`.
 - [ ] Rig picker UI; code-sign the bundled dylib for notarised distribution.
 
