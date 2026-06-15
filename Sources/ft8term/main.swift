@@ -310,30 +310,13 @@ func makeRig() async -> RigController {
     guard let i = args.firstIndex(of: "--rig"), i + 1 < args.count else {
         return MockRigController()
     }
-    let spec = args[i + 1]
-    let model: Int
-    var device: String? = nil
-    var baud = 0
-    if spec == "dummy" {
-        model = HamlibModel.dummy
-    } else {
-        let parts = spec.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-        guard let m = Int(parts[0]) else {
-            FileHandle.standardError.write(Data("error: bad --rig model: \(parts[0])\n".utf8))
-            exit(1)
-        }
-        model = m
-        if parts.count > 1, !parts[1].isEmpty { device = parts[1] }
-        if parts.count > 2, let b = Int(parts[2]) { baud = b }
-    }
-    let rig = HamlibRigController(model: model, device: device, serialSpeed: baud)
     do {
+        let rig = try RigSpec.controller(args[i + 1])
         try await rig.open()
+        return rig
     } catch {
-        FileHandle.standardError.write(Data("error: \(error)\n".utf8))
-        exit(1)
+        errExit("\(error)")
     }
-    return rig
 }
 
 // Restore the terminal on Ctrl-C even if we're mid-render.

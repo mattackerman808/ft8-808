@@ -14,14 +14,6 @@ import HamlibRig
 //   e.g.  ftdx101d,/dev/cu.usbserial-00943F8D0,38400
 //         1040,/dev/cu.usbserial-00943F8D0,38400
 
-// A few named models for convenience (Hamlib model numbers).
-let rigAliases: [String: Int] = [
-    "dummy": HamlibModel.dummy,
-    "netrigctl": HamlibModel.netRigctl,
-    "ftdx101d": 1040,
-    "ftdx101mp": 1044,
-]
-
 func die(_ msg: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write(Data((msg + "\n").utf8))
     exit(code)
@@ -37,7 +29,7 @@ func usage() -> Never {
       ft8rig ptt     --rig <spec> <on|off>   (keys TX — use a dummy load!)
 
       <spec> = dummy | <name-or-model>[,<device>[,<baud>]]
-      known names: \(rigAliases.keys.sorted().joined(separator: ", "))
+      known names: \(RigSpec.aliases.keys.sorted().joined(separator: ", "))
     """, code: 2)
 }
 
@@ -45,15 +37,11 @@ func parseRigSpec(_ args: [String]) -> HamlibRigController {
     guard let i = args.firstIndex(of: "--rig"), i + 1 < args.count else {
         die("error: --rig <spec> is required")
     }
-    let parts = args[i + 1].split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-    let key = parts[0].lowercased()
-    let model: Int
-    if let m = rigAliases[key] { model = m }
-    else if let m = Int(parts[0]) { model = m }
-    else { die("error: unknown rig '\(parts[0])'") }
-    let device = parts.count > 1 && !parts[1].isEmpty ? parts[1] : nil
-    let baud = parts.count > 2 ? (Int(parts[2]) ?? 0) : 0
-    return HamlibRigController(model: model, device: device, serialSpeed: baud)
+    do {
+        return try RigSpec.controller(args[i + 1])
+    } catch {
+        die("error: \(error)")
+    }
 }
 
 func listPorts() {
