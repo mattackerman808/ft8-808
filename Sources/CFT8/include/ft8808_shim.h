@@ -43,6 +43,32 @@ int ft8808_decode_wav(const char* path,
                       ft8808_decoded_t* out,
                       int max_out);
 
+// ---- Transmit path -------------------------------------------------------
+
+// Maximum number of tones in a transmission (FT4 = 105 >= FT8 = 79).
+#define FT8808_MAX_TONES 105
+
+// Encode a message into FSK tones (0..7 for FT8). `tones_out` must hold at
+// least FT8808_MAX_TONES bytes. Returns the number of tones (79 for FT8,
+// 105 for FT4), or a negative value on error (-1 = message could not be
+// parsed/packed into a valid FT8/FT4 message).
+int ft8808_encode_message(const char* text,
+                          ft8808_protocol_t protocol,
+                          unsigned char* tones_out,
+                          int max_tones);
+
+// Synthesize GFSK-shaped audio from tones into `signal_out` (mono, [-1, +1]).
+// `base_freq_hz` is the audio frequency of tone 0. Returns the number of
+// samples written (the on-air waveform, no silence padding), or negative on
+// error. Use ft8808_slot_samples() to size a full padded slot if desired.
+int ft8808_synthesize(const unsigned char* tones,
+                      int num_tones,
+                      float base_freq_hz,
+                      ft8808_protocol_t protocol,
+                      int sample_rate,
+                      float* signal_out,
+                      int max_samples);
+
 #ifdef __cplusplus
 }
 #endif

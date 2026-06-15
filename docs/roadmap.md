@@ -51,8 +51,12 @@ macOS app later. See [architecture.md](architecture.md).
 - [ ] ADIF logging.
 
 ## Milestone 4 — Transmit
-- [ ] `FT8Codec.encode(String) -> [Float]` over ft8_lib's encoder.
-- [ ] 8-FSK (GFSK-shaped) audio synthesis; output device + PTT keying.
+- [x] `FT8Codec.encode(text) -> tones` over ft8_lib's encoder; `synthesize` +
+      `transmitAudio` GFSK waveform synthesis (reference ft8_lib algorithm).
+- [x] Proven offline: encode → synth → decode round-trips for CQ / report /
+      RR73 at multiple audio offsets (no RF).
+- [ ] Audio OUTPUT to the rig's USB codec (AVAudioEngine output node).
+- [ ] On-air TX: key PTT at the UTC boundary, play the slot, un-key (dummy load).
 - [ ] Close the loop: complete an automated QSO from `ft8term`.
 
 ## Milestone 5 — macOS app

@@ -33,6 +33,8 @@ public enum FT8CodecError: Error, Equatable {
     case wavLoadFailed(path: String)
     /// The decoder rejected its inputs (empty buffer, bad params).
     case invalidInput
+    /// The message text could not be packed into a valid FT8/FT4 message.
+    case encodeFailed(message: String)
 }
 
 /// Swift-native facade over the vendored ft8_lib decoder.
@@ -94,6 +96,66 @@ public enum FT8Codec {
         if count == -1 { throw FT8CodecError.wavLoadFailed(path: wavPath) }
         guard count >= 0 else { throw FT8CodecError.invalidInput }
         return (0..<Int(count)).map { FT8Message(out[$0]) }
+    }
+
+    // MARK: - Transmit
+
+    /// Pack a message into FSK tones (0…7 for FT8, 79 tones; 105 for FT4).
+    /// Throws `encodeFailed` if the text isn't a valid FT8/FT4 message.
+    public static func encode(_ text: String, protocol proto: FT8Protocol = .ft8) throws -> [UInt8] {
+        var tones = [UInt8](repeating: 0, count: Int(FT8808_MAX_TONES))
+        let n = text.withCString { cText in
+            tones.withUnsafeMutableBufferPointer { tb in
+                ft8808_encode_message(cText, proto.cValue, tb.baseAddress, Int32(tb.count))
+            }
+        }
+        guard n > 0 else { throw FT8CodecError.encodeFailed(message: text) }
+        return Array(tones.prefix(Int(n)))
+    }
+
+    /// Synthesize GFSK-shaped audio for the given tones at a chosen audio offset.
+    /// Returns the on-air waveform (no slot padding) in `[-1, +1]`.
+    public static func synthesize(
+        tones: [UInt8],
+        baseFrequencyHz: Float,
+        protocol proto: FT8Protocol = .ft8,
+        sampleRate: Int = 12_000
+    ) -> [Float] {
+        let period = proto == .ft4 ? 0.048 : 0.160
+        let samplesPerSymbol = Int((Double(sampleRate) * period).rounded())
+        let capacity = tones.count * samplesPerSymbol
+        guard capacity > 0 else { return [] }
+
+        var signal = [Float](repeating: 0, count: capacity)
+        let n = tones.withUnsafeBufferPointer { tb in
+            signal.withUnsafeMutableBufferPointer { sb in
+                ft8808_synthesize(tb.baseAddress, Int32(tones.count), baseFrequencyHz,
+                                  proto.cValue, Int32(sampleRate), sb.baseAddress, Int32(capacity))
+            }
+        }
+        guard n > 0 else { return [] }
+        return Int(n) == capacity ? signal : Array(signal.prefix(Int(n)))
+    }
+
+    /// Encode + synthesize a full slot's audio: the message centered in
+    /// `slotSeconds` of silence, ready to play during a TX slot.
+    public static func transmitAudio(
+        _ text: String,
+        baseFrequencyHz: Float = 1500,
+        protocol proto: FT8Protocol = .ft8,
+        sampleRate: Int = 12_000,
+        slotSeconds: Double = 15.0
+    ) throws -> [Float] {
+        let tones = try encode(text, protocol: proto)
+        let data = synthesize(tones: tones, baseFrequencyHz: baseFrequencyHz,
+                              protocol: proto, sampleRate: sampleRate)
+        let slotSamples = Int(Double(sampleRate) * slotSeconds)
+        guard data.count < slotSamples else { return data }
+        let lead = (slotSamples - data.count) / 2
+        var out = [Float](repeating: 0, count: lead)
+        out.append(contentsOf: data)
+        out.append(contentsOf: [Float](repeating: 0, count: slotSamples - out.count))
+        return out
     }
 }
 

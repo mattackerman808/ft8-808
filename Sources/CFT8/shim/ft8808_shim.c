@@ -8,12 +8,16 @@
 
 #include <ft8/decode.h>
 #include <ft8/message.h>
+#include <ft8/encode.h>
+#include <ft8/constants.h>
 #include <common/monitor.h>
 #include <common/wave.h>
 
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <math.h>
 
 // ---- Decode tuning (mirrors ft8_lib demo defaults) ------------------------
 #define FT8808_MIN_SCORE      10
@@ -184,4 +188,92 @@ int ft8808_decode_wav(const char* path,
         return -1;
     }
     return ft8808_decode_samples(signal, num_samples, sample_rate, protocol, out, max_out);
+}
+
+// ---- Transmit path --------------------------------------------------------
+// GFSK synthesis adapted from ft8_lib demo/gen_ft8.c (MIT, (c) Kārlis Goba),
+// with heap-allocated work buffers instead of large stack VLAs.
+
+#define FT8808_GFSK_K 5.336446f // == pi * sqrt(2 / log(2))
+#define FT8_SYMBOL_BT 2.0f
+#define FT4_SYMBOL_BT 1.0f
+
+int ft8808_encode_message(const char* text, ft8808_protocol_t protocol,
+                          unsigned char* tones_out, int max_tones) {
+    if (text == NULL || tones_out == NULL) return -2;
+    bool is_ft4 = (protocol == FT8808_PROTOCOL_FT4);
+    int num_tones = is_ft4 ? FT4_NN : FT8_NN;
+    if (max_tones < num_tones) return -3;
+
+    ftx_message_t msg;
+    ftx_message_rc_t rc = ftx_message_encode(&msg, NULL, text);
+    if (rc != FTX_MESSAGE_RC_OK) return -1;
+
+    if (is_ft4) {
+        ft4_encode(msg.payload, tones_out);
+    } else {
+        ft8_encode(msg.payload, tones_out);
+    }
+    return num_tones;
+}
+
+static void ft8808_gfsk_pulse(int n_spsym, float symbol_bt, float* pulse) {
+    for (int i = 0; i < 3 * n_spsym; ++i) {
+        float t = i / (float)n_spsym - 1.5f;
+        float arg1 = FT8808_GFSK_K * symbol_bt * (t + 0.5f);
+        float arg2 = FT8808_GFSK_K * symbol_bt * (t - 0.5f);
+        pulse[i] = (erff(arg1) - erff(arg2)) / 2;
+    }
+}
+
+int ft8808_synthesize(const unsigned char* tones, int num_tones, float f0,
+                      ft8808_protocol_t protocol, int sample_rate,
+                      float* signal, int max_samples) {
+    if (tones == NULL || signal == NULL || num_tones <= 0 || sample_rate <= 0) return -2;
+    bool is_ft4 = (protocol == FT8808_PROTOCOL_FT4);
+    float symbol_period = is_ft4 ? FT4_SYMBOL_PERIOD : FT8_SYMBOL_PERIOD;
+    float symbol_bt = is_ft4 ? FT4_SYMBOL_BT : FT8_SYMBOL_BT;
+
+    int n_spsym = (int)(0.5f + sample_rate * symbol_period); // samples per symbol
+    int n_wave = num_tones * n_spsym;                        // output samples
+    if (n_wave > max_samples) return -3;
+
+    float hmod = 1.0f;
+    float dphi_peak = 2 * M_PI * hmod / n_spsym;
+    int dphi_len = n_wave + 2 * n_spsym;
+
+    float* dphi = (float*)malloc(sizeof(float) * (size_t)dphi_len);
+    float* pulse = (float*)malloc(sizeof(float) * (size_t)(3 * n_spsym));
+    if (dphi == NULL || pulse == NULL) { free(dphi); free(pulse); return -4; }
+
+    for (int i = 0; i < dphi_len; ++i) dphi[i] = 2 * M_PI * f0 / sample_rate;
+    ft8808_gfsk_pulse(n_spsym, symbol_bt, pulse);
+
+    for (int i = 0; i < num_tones; ++i) {
+        int ib = i * n_spsym;
+        for (int j = 0; j < 3 * n_spsym; ++j)
+            dphi[j + ib] += dphi_peak * tones[i] * pulse[j];
+    }
+    // Extend first and last symbols.
+    for (int j = 0; j < 2 * n_spsym; ++j) {
+        dphi[j] += dphi_peak * pulse[j + n_spsym] * tones[0];
+        dphi[j + num_tones * n_spsym] += dphi_peak * pulse[j] * tones[num_tones - 1];
+    }
+
+    float phi = 0;
+    for (int k = 0; k < n_wave; ++k) {
+        signal[k] = sinf(phi);
+        phi = fmodf(phi + dphi[k + n_spsym], 2 * M_PI);
+    }
+    // Ramp the first/last symbol envelopes to avoid key clicks.
+    int n_ramp = n_spsym / 8;
+    for (int i = 0; i < n_ramp; ++i) {
+        float env = (1 - cosf(2 * M_PI * i / (2 * n_ramp))) / 2;
+        signal[i] *= env;
+        signal[n_wave - 1 - i] *= env;
+    }
+
+    free(dphi);
+    free(pulse);
+    return n_wave;
 }
