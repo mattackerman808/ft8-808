@@ -22,8 +22,8 @@ macOS app later. See [architecture.md](architecture.md).
       slot alignment (`SlotAccumulator`, unit-tested), CoreAudio device picker.
 - [x] `ft8term --live [--audio <name>]` and `--list-audio`; embedded Info.plist
       so the CLI can prompt for mic permission.
-- [ ] Verify live decode end-to-end on the FTDX-101D's USB codec (run + grant
-      mic permission — `--audio "USB AUDIO"`).
+- [x] Verified live decode end-to-end on the FTDX-101D's USB codec — real
+      off-air decodes + live CAT frequency in the status line. 🎉
 - [ ] NTP / clock-offset display (warn when drift exceeds slot tolerance).
 - [ ] Scrolling (time-axis) waterfall once audio is live, not just per-slot.
 
