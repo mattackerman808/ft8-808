@@ -1,0 +1,4 @@
+module CFT8 {
+    header "ft8808_shim.h"
+    export *
+}

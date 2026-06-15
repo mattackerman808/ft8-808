@@ -2,10 +2,12 @@
 
 Ordered to de-risk the hardest/unknown parts first.
 
-## Milestone 0 — Spike the codec (de-risk decode)
-- [ ] Vendor `ft8_lib`, build it as a SwiftPM C target.
-- [ ] Swift `FT8Codec` wrapper: `decode([Float]) -> [DecodedMessage]`, `encode(String) -> [Float]`.
-- [ ] Prove it: decode a known-good recorded 15 s WAV and match expected messages.
+## Milestone 0 — Spike the codec (de-risk decode) ✅
+- [x] Vendor `ft8_lib`, build it as a SwiftPM C target (`CFT8`).
+- [x] Swift `FT8Codec` wrapper: `decode(samples:)` and `decode(wavPath:)`.
+- [x] Prove it: decode known-good recordings (`191111_110130.wav` → 4 msgs,
+      `websdr_test14_12k.wav` → 13 msgs) under XCTest. ~38 ms/slot.
+- [ ] Encode path (`encode(String) -> [Float]`) — deferred to Milestone 3 (TX).
 
 ## Milestone 1 — Audio in + waterfall
 - [ ] AVAudioEngine capture, resample to 12 kHz mono.
