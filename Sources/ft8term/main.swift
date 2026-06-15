@@ -220,18 +220,20 @@ final class App {
         render()
     }
 
-    /// Sweep the drive up from a low level until ALC just deflects (or output
-    /// power plateaus), then settle at the highest clean level — the max-power,
-    /// no-ALC knee. Requires a rig that reports ALC/power over CAT.
+    /// Find the clean drive level by sweeping and reading the POWER curve: below
+    /// the knee power tracks drive, at/above it the rig limits and power flattens.
+    /// We sweep up until power clearly plateaus, then settle at the LOWEST drive
+    /// that reaches ~97% of the peak — max power with the least audio (no ALC).
+    /// Independent of the rig's ALC scale.
     private func autoTune() async {
         guard !autoTuning, !tuneBusy else { return }
 
-        // Make sure we're transmitting a tone first.
         if !tuning { await startTune(); guard tuning else { return } }
 
-        // Need ALC readback to find the knee.
-        guard let probe = await rig.meters(), probe.alc != nil || probe.powerWatts != nil else {
-            notice = "auto-tune needs rig ALC/power over CAT (not reported)"
+        // Need power readback to find the knee.
+        guard let probe = await rig.meters(),
+              probe.powerWatts != nil || probe.powerPercent != nil else {
+            notice = "auto-tune needs rig power readback over CAT (not reported)"
             render()
             return
         }
@@ -239,41 +241,49 @@ final class App {
         autoTuning = true
         defer { autoTuning = false }
 
-        let alcThreshold: Float = 0.1   // refine once we see real FTDX-101D values
-        let startDb: Float = -50
-        var bestDb = startDb
-        var bestPower: Float = 0
-        var plateau = 0
+        func power(_ m: RigMeters?) -> Float { m?.powerWatts ?? ((m?.powerPercent ?? 0) * 100) }
+
+        let startDb: Float = -45
+        let maxDb: Float = -10   // backstop; the knee plateau normally stops us first
+        var samples: [(db: Float, power: Float)] = []
+        var maxPower: Float = 0
+        var flat = 0
         var db = startDb
 
-        while db <= 0 {
+        while db <= maxDb {
             if !tuning || Task.isCancelled { break }
             setLevelDb(db)
-            try? await Task.sleep(nanoseconds: 350_000_000) // let the rig settle
+            try? await Task.sleep(nanoseconds: 280_000_000) // let the rig settle
             let m = await rig.meters()
             lastMeters = m
-            let alc = m?.alc ?? 0
-            let power = m?.powerWatts ?? ((m?.powerPercent ?? 0) * 100)
+            let p = power(m)
+            samples.append((db, p))
+            notice = String(format: "auto-tune: %+.0f dBFS  %.0f W  ALC %.2f", db, p, m?.alc ?? 0)
             render()
 
-            if alc > alcThreshold {           // overdrive onset → previous step was the knee
-                break
-            }
-            if power <= bestPower + 0.5 {      // no more power to be had (ceiling)
-                plateau += 1
-                if plateau >= 2 { break }
+            // A real increase resets the plateau counter; a non-increase counts.
+            if p > maxPower + max(0.5, maxPower * 0.02) {
+                maxPower = p
+                flat = 0
             } else {
-                plateau = 0
-                bestDb = db
-                bestPower = power
+                flat += 1
             }
+            // Only call it plateaued once we actually have meaningful power, so
+            // the dead low end of the sweep can't trip it (the old "1 W" bug).
+            if flat >= 3 && maxPower > 5 { break }
             db += 1
         }
 
-        setLevelDb(bestDb)
+        // Knee = lowest drive reaching ~97% of peak power.
+        let target = maxPower * 0.97
+        let knee = samples.first(where: { $0.power >= target })?.db
+            ?? samples.max(by: { $0.power < $1.power })?.db
+            ?? txLevelDb
+
+        setLevelDb(knee)
         try? await Task.sleep(nanoseconds: 300_000_000)
         lastMeters = await rig.meters()
-        notice = String(format: "auto-tune → %.0f dBFS (≈%.0f W, ALC clean)", bestDb, bestPower)
+        notice = String(format: "auto-tune → %+.0f dBFS (≈%.0f W peak)", knee, maxPower)
         render()
     }
 
