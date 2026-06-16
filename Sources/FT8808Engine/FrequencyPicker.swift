@@ -3,19 +3,19 @@ import Foundation
 /// Chooses a clear audio offset to transmit on, from a normalized "busy map"
 /// (FFT magnitudes in `[0, 1]` per bin) spanning the passband.
 ///
-/// "Quietest bin" alone is wrong: the band edges read empty only because they're
-/// past the SSB filter rolloff, where there's no usable response. So we restrict
-/// to a usable sub-band and, among slices essentially as quiet as the quietest,
-/// prefer the one nearest band center — where activity is expected and the audio
-/// response is flat.
+/// "Quietest bin" alone is wrong on two counts: the band edges read empty only
+/// because they're past the SSB filter rolloff (no usable response there), and
+/// operators expect calls near band center. So we restrict to a `usable`
+/// sub-band and score each slice by `energy + centerWeight · distanceFromCenter`,
+/// taking the minimum — i.e. sit as central as possible, moving off only to
+/// avoid an actual signal.
 public enum FrequencyPicker {
     public static func clearOffset(
         busyMap spec: [Float],
         passband: ClosedRange<Float>,
+        usable: ClosedRange<Float>,
         signalWidthHz: Float = 50,
-        edgeMarginLowHz: Float = 100,
-        edgeMarginHighHz: Float = 300,
-        quietMargin: Float = 0.08
+        centerWeight: Float = 0.6
     ) -> Float? {
         let cols = spec.count
         guard cols > 4 else { return nil }
@@ -26,10 +26,11 @@ public enum FrequencyPicker {
         let win = max(2, Int((signalWidthHz / span) * Float(cols)))
         guard win <= cols else { return nil }
 
-        let usableLo = lo + edgeMarginLowHz
-        let usableHi = hi - edgeMarginHighHz
+        let usableLo = max(lo, usable.lowerBound)
+        let usableHi = min(hi, usable.upperBound)
         guard usableHi > usableLo else { return nil }
         let bandCenter = (usableLo + usableHi) / 2
+        let halfWidth = max(1, (usableHi - usableLo) / 2)
 
         func centerHz(at start: Int) -> Float {
             lo + ((Float(start) + Float(win) / 2) / Float(cols)) * span
@@ -38,19 +39,15 @@ public enum FrequencyPicker {
         var prefix = [Float](repeating: 0, count: cols + 1)
         for i in 0..<cols { prefix[i + 1] = prefix[i] + spec[i] }
 
-        var candidates: [(start: Int, energy: Float)] = []
+        var bestStart = -1
+        var bestScore = Float.greatestFiniteMagnitude
         for start in 0...(cols - win) {
             let f = centerHz(at: start)
             guard f >= usableLo, f <= usableHi else { continue }
-            candidates.append((start, (prefix[start + win] - prefix[start]) / Float(win)))
+            let energy = (prefix[start + win] - prefix[start]) / Float(win)
+            let score = energy + centerWeight * (abs(f - bandCenter) / halfWidth)
+            if score < bestScore { bestScore = score; bestStart = start }
         }
-        guard let minE = candidates.map(\.energy).min() else { return nil }
-
-        let pick = candidates
-            .filter { $0.energy <= minE + quietMargin }
-            .min { abs(centerHz(at: $0.start) - bandCenter) < abs(centerHz(at: $1.start) - bandCenter) }
-            ?? candidates.min { $0.energy < $1.energy }
-
-        return pick.map { centerHz(at: $0.start) }
+        return bestStart >= 0 ? centerHz(at: bestStart) : nil
     }
 }

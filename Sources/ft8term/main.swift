@@ -229,7 +229,9 @@ final class App {
     /// Auto-pick a clear, usable, central ~50 Hz slice from the busy map.
     private func autoPickTxFrequency() {
         let spec = avgSpectrum.isEmpty ? spectrum : avgSpectrum
-        guard let hz = FrequencyPicker.clearOffset(busyMap: spec, passband: passband) else {
+        // Prefer the 800–2000 Hz heart of the band, strongly centered.
+        guard let hz = FrequencyPicker.clearOffset(busyMap: spec, passband: passband,
+                                                   usable: 800...2000) else {
             notice = "no spectrum yet — wait for a slot"; render(); return
         }
         setTxOffset(hz)
