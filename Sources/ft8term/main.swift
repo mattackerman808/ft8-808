@@ -53,6 +53,11 @@ final class App {
     private var notice: String?
     private var autoTuning = false
 
+    // Settings panel.
+    private enum Mode { case receive, settings }
+    private var mode: Mode = .receive
+    private var settings: SettingsEditor?
+
     private static func amplitude(fromDb db: Float) -> Float {
         db <= -90 ? 0 : pow(10, db / 20)
     }
@@ -187,9 +192,12 @@ final class App {
     }
 
     private func handleKey(_ c: UInt8) {
+        if mode == .settings { settingsKey(c); return }
         switch c {
         case UInt8(ascii: "q"), 3:
             quit?.resume(); quit = nil
+        case UInt8(ascii: "s"), UInt8(ascii: "S"):
+            openSettings()
         case UInt8(ascii: "t"), UInt8(ascii: "T"):
             toggleTune()
         case UInt8(ascii: "+"), UInt8(ascii: "="):
@@ -215,6 +223,7 @@ final class App {
 
     /// Arrow keys: ←/→ move the TX cursor (fine), ↑/↓ move it coarse.
     private func handleArrow(_ dir: UInt8) {
+        if mode == .settings { settingsArrow(dir); return }
         switch dir {
         case 0x44: setTxOffset(txOffsetHz - 10)   // left
         case 0x43: setTxOffset(txOffsetHz + 10)   // right
@@ -222,6 +231,69 @@ final class App {
         case 0x42: setTxOffset(txOffsetHz - 100)  // down
         default: break
         }
+    }
+
+    // ---- Settings panel ------------------------------------------------------
+
+    private func openSettings() {
+        let serials = ((try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? [])
+            .filter { $0.hasPrefix("cu.") && ($0.contains("usb") || $0.contains("serial")) }
+            .map { "/dev/\($0)" }.sorted()
+        settings = SettingsEditor(
+            config: config,
+            serialPorts: serials,
+            inputDevices: AudioDevices.inputDevices().map(\.name),
+            outputDevices: AudioDevices.outputDevices().map(\.name))
+        mode = .settings
+        render()
+    }
+
+    private func closeSettings() {
+        settings = nil
+        mode = .receive
+        render()
+    }
+
+    private func applySettings() {
+        guard let ed = settings else { return }
+        ed.apply(to: &config)
+        saveConfig()
+        settings = nil
+        mode = .receive
+        notice = "settings saved — restart to apply rig/audio/proto changes"
+        render()
+    }
+
+    private func settingsKey(_ c: UInt8) {
+        guard let ed = settings else { return }
+        if ed.editing {
+            switch c {
+            case 13, 10: ed.commitEdit()
+            case 127, 8: ed.backspace()
+            case 32...126: ed.typeCharacter(Character(UnicodeScalar(c)))
+            default: break
+            }
+            render(); return
+        }
+        switch c {
+        case 13, 10: ed.activate()                     // Enter: edit text / cycle choice
+        case UInt8(ascii: "s"), 0x13: applySettings()  // s or Ctrl-S
+        case UInt8(ascii: "q"), 3: closeSettings()     // q: cancel
+        default: break
+        }
+        render()
+    }
+
+    private func settingsArrow(_ dir: UInt8) {
+        guard let ed = settings, !ed.editing else { return }
+        switch dir {
+        case 0x41: ed.moveSelection(-1)  // up
+        case 0x42: ed.moveSelection(1)   // down
+        case 0x44: ed.cycle(-1)          // left
+        case 0x43: ed.cycle(1)           // right
+        default: break
+        }
+        render()
     }
 
     /// Move the TX cursor, keeping room for the ~50 Hz signal inside the passband.
@@ -401,10 +473,22 @@ final class App {
     }
 
     // ---- Rendering -----------------------------------------------------------
+    /// Write a frame flicker-free: home, clear each line to EOL, wipe below.
+    private func commit(_ body: String) {
+        let framed = Terminal.home()
+            + body.replacingOccurrences(of: "\r\n", with: "\u{001B}[K\r\n")
+            + "\u{001B}[0J"
+        Terminal.write(framed)
+    }
+
     private func render() {
+        if mode == .settings, let ed = settings {
+            commit(renderSettings(ed))
+            return
+        }
         let (rows, cols) = Terminal.size()
         let width = max(40, cols)
-        var out = Terminal.home()
+        var out = ""
 
         // Status line.
         let utc = Self.utcStamp()
@@ -464,13 +548,11 @@ final class App {
                 : "\(Terminal.dim)decoding…\(Terminal.reset)"
             out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[T]\(Terminal.reset)une  "
                 + "\(Terminal.bold)←/→\(Terminal.reset) TX  \(Terminal.bold)[F]\(Terminal.reset)ind  "
+                + "\(Terminal.bold)[S]\(Terminal.reset)ettings  "
                 + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)  \(status)"
         }
 
-        // Smooth redraw: clear each line to EOL and wipe below, rather than a
-        // full-screen clear — avoids flicker at the cycle bar's refresh rate.
-        out = out.replacingOccurrences(of: "\r\n", with: "\u{001B}[K\r\n") + "\u{001B}[0J"
-        Terminal.write(out)
+        commit(out)
     }
 
     private func format(_ line: ActivityLine) -> String {
@@ -527,6 +609,43 @@ final class App {
         let stops = [21, 39, 51, 46, 226, 208, 196]
         let idx = min(stops.count - 1, max(0, Int(v * Float(stops.count))))
         return stops[idx]
+    }
+
+    private func renderSettings(_ ed: SettingsEditor) -> String {
+        var out = Terminal.bold + Terminal.fg256(45) + " FT8-808 Settings" + Terminal.reset + "\r\n"
+        out += rule(min(Terminal.size().cols, 60)) + "\r\n"
+
+        for (i, field) in ed.fields.enumerated() {
+            let selected = i == ed.selected
+            let marker = selected ? "\(Terminal.fg256(45))▸\(Terminal.reset)" : " "
+            let label = field.label.padding(toLength: 10, withPad: " ", startingAt: 0)
+
+            let value: String
+            if selected && ed.editing {
+                value = "\(Terminal.fg256(231))\(ed.buffer)\(Terminal.fg256(201))▏\(Terminal.reset)"
+            } else if selected {
+                // Hint the choice arrows for choice fields.
+                let v = ed.values[i]
+                if case .choice = field.kind {
+                    value = "\(Terminal.fg256(231))‹ \(v) ›\(Terminal.reset)"
+                } else {
+                    value = "\(Terminal.fg256(231))\(v)\(Terminal.reset)"
+                }
+            } else {
+                value = "\(Terminal.dim)\(ed.values[i])\(Terminal.reset)"
+            }
+            out += "  \(marker) \(Terminal.dim)\(label)\(Terminal.reset)  \(value)\r\n"
+        }
+
+        out += "\r\n" + rule(min(Terminal.size().cols, 60)) + "\r\n"
+        if ed.editing {
+            out += " \(Terminal.dim)typing… \(Terminal.bold)[Enter]\(Terminal.reset)\(Terminal.dim) done\(Terminal.reset)"
+        } else {
+            out += " \(Terminal.bold)↑↓\(Terminal.reset) field  \(Terminal.bold)←→\(Terminal.reset) change  "
+                + "\(Terminal.bold)[Enter]\(Terminal.reset) edit  "
+                + "\(Terminal.bold)[S]\(Terminal.reset)ave  \(Terminal.bold)[Q]\(Terminal.reset) cancel"
+        }
+        return out
     }
 
     /// A `▲` marker aligned under the waterfall column for the TX audio offset.

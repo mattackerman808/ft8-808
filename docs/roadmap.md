@@ -54,7 +54,9 @@ macOS app later. See [architecture.md](architecture.md).
       from config; auto-tune drive + TX offset persisted; station shown in status.
 - [ ] Message parsing into structured fields (call_to / call_de / grid / report).
 - [ ] Split view: Band Activity (all) ǀ Rx Frequency (filtered to TX offset).
-- [ ] Settings panel (TUI): edit rig / serial / audio / call / prefs.
+- [x] Settings panel (TUI, press `S`): edit call / grid / rig / serial / baud /
+      audio in / audio out / proto; arrow-nav, inline text edit, choice cycling;
+      saves to config. (Rig/audio/proto changes apply on restart.)
 - [ ] Auto-sequencing state machine (reply → report → R-report → RR73 → 73).
 - [ ] ADIF logging.
 
