@@ -45,19 +45,32 @@ final class SettingsEditor {
 
         let (rig, serial, baud) = Self.splitRig(config.rigSpec)
 
-        // Auto-detect: pre-fill empty device/port fields with the likely rig.
+        // Auto-detect: use the saved value only if that device/port is still
+        // present; otherwise pick the likely rig (handles a swapped/unplugged rig).
         let rigSerial = serialPorts.first(where: { $0.likelyRig })?.path
         let rigInput = inputDevices.first(where: { Self.isRig($0) })?.name
         let rigOutput = outputDevices.first(where: { Self.isRig($0) })?.name
+
+        func present(_ value: String?, in names: [String]) -> Bool {
+            guard let value else { return false }
+            return names.contains(value)
+        }
+
+        let serialValue = present(serial.isEmpty ? nil : serial, in: serialPorts.map(\.path))
+            ? serial : (rigSerial ?? "none")
+        let inValue = present(config.audioInput, in: inputDevices.map(\.name))
+            ? config.audioInput! : (rigInput ?? "default")
+        let outValue = present(config.audioOutput, in: outputDevices.map(\.name))
+            ? config.audioOutput! : (rigOutput ?? "default")
 
         values = [
             config.callsign,
             config.grid,
             rig.isEmpty ? "none" : rig,
-            serial.isEmpty ? (rigSerial ?? "none") : serial,
+            serialValue,
             baud.isEmpty ? "38400" : baud,
-            config.audioInput ?? (rigInput ?? "default"),
-            config.audioOutput ?? (rigOutput ?? "default"),
+            inValue,
+            outValue,
             config.proto,
         ]
     }

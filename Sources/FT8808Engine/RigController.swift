@@ -57,6 +57,23 @@ public extension RigController {
     func meters() async -> RigMeters? { nil }
 }
 
+/// A "no rig" controller used when a configured rig can't be opened. Reports
+/// disconnected (status shows "no rig") and refuses transmit, so the app still
+/// runs (receive/monitor) and the user can fix the config in Settings.
+public struct NullRigController: RigController {
+    public enum Failure: Error, CustomStringConvertible {
+        case noRig
+        public var description: String { "no rig connected" }
+    }
+    public init() {}
+    public func state() async -> RigState {
+        RigState(frequencyHz: 0, mode: .usb, transmitting: false, connected: false)
+    }
+    public func setFrequency(_ hz: Int) async throws { throw Failure.noRig }
+    public func setMode(_ mode: RigMode) async throws { throw Failure.noRig }
+    public func setPTT(_ on: Bool) async throws { throw Failure.noRig }
+}
+
 /// A stand-in rig for development: fixed on the 20 m FT8 watering hole.
 public actor MockRigController: RigController {
     private var current: RigState

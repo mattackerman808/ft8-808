@@ -37,7 +37,9 @@ static ft8808_mode mode_from_hamlib(rmode_t m) {
 
 ft8808_rig* ft8808_rig_open(int model, const char* device, int serial_speed, int* err_out) {
     // Keep Hamlib quiet unless something goes wrong.
-    rig_set_debug(RIG_DEBUG_ERR);
+    // Silence Hamlib's stderr logging — we surface errors via return codes and
+    // would otherwise corrupt the TUI / flash debug spew on open failures.
+    rig_set_debug(RIG_DEBUG_NONE);
 
     RIG* rig = rig_init((rig_model_t)model);
     if (rig == NULL) {

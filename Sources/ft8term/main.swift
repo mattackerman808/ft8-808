@@ -64,8 +64,10 @@ final class App {
         db <= -90 ? 0 : pow(10, db / 20)
     }
 
+    private let pendingNotice: String?
+
     init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController,
-         outDevice: String?, config: StationConfig) {
+         outDevice: String?, config: StationConfig, initialNotice: String? = nil) {
         let (rows, cols) = Terminal.size()
         _ = rows
         let columns = max(20, cols - 2)
@@ -77,6 +79,7 @@ final class App {
         self.sourceLabel = label
         self.outDevice = outDevice
         self.config = config
+        self.pendingNotice = initialNotice
         self.txOffsetHz = config.txOffsetHz
         self.txLevelDb = config.txDriveDb
     }
@@ -87,6 +90,7 @@ final class App {
 
     func run() async {
         rigState = await rig.state()
+        if let pendingNotice { notice = pendingNotice }
         if interactive { startKeyReader(); startRigPoll(); startClock() }
         render()
         let engine = self.engine      // Sendable structs — safe to capture.
@@ -883,14 +887,15 @@ if let path = positionals.first {
     sourceLabel = "live: \(audioDevice ?? "default input")"
 }
 
-func makeRig(spec: String?) async -> RigController {
-    guard let spec else { return MockRigController() }
+func makeRig(spec: String?) async -> (rig: RigController, warning: String?) {
+    guard let spec else { return (MockRigController(), nil) }
     do {
         let rig = try RigSpec.controller(spec)
         try await rig.open()
-        return rig
+        return (rig, nil)
     } catch {
-        errExit("\(error)")
+        // Don't bail — start without CAT so the user can fix it in Settings.
+        return (NullRigController(), "rig open failed (\(spec)) — press S to set the right port")
     }
 }
 
@@ -898,9 +903,9 @@ func makeRig(spec: String?) async -> RigController {
 signal(SIGINT)  { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
 signal(SIGTERM) { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
 
-let rig = await makeRig(spec: config.rigSpec)
+let (rig, rigWarning) = await makeRig(spec: config.rigSpec)
 Terminal.enableRawMode()
 let app = App(source: source, label: sourceLabel, proto: proto, rig: rig,
-              outDevice: outDevice, config: config)
+              outDevice: outDevice, config: config, initialNotice: rigWarning)
 await app.run()
 Terminal.restore()
