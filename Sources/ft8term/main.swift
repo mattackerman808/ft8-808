@@ -51,7 +51,8 @@ final class App {
     private var txLevelDb: Float = -40  // audio drive in dBFS (fine control)
     private var lastMeters: RigMeters?
     private var meterTask: Task<Void, Never>?
-    private var notice: String?
+    private var notice: String? { didSet { noticeSetAt = (notice == nil) ? nil : Date() } }
+    private var noticeSetAt: Date?
     private var autoTuning = false
 
     // Settings panel.
@@ -553,7 +554,8 @@ final class App {
                 + "\(Terminal.dim)(amp \(String(format: "%.3f", amp)))\(Terminal.reset)  "
                 + meterText()
                 + "  \(Terminal.dim)[+/-] [A]uto [T]stop\(Terminal.reset)"
-        } else if let notice {
+        } else if let notice, let at = noticeSetAt, Date().timeIntervalSince(at) < 8 {
+            // Show a transient notice (tune result, errors…) then revert to hints.
             out += " \(Terminal.fg256(208))\(notice)\(Terminal.reset)"
         } else {
             let status = finished
