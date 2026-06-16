@@ -102,7 +102,9 @@ final class App {
         clockTask?.cancel(); clockTask = nil
         meterTask?.cancel(); meterTask = nil
         tx?.stop(); tx = nil
-        if tuning { try? await rig.setPTT(false); tuning = false }
+        // Unconditionally un-key on the way out — never depend on the tuning
+        // flag (a half-started tune could have PTT on with tuning == false).
+        try? await rig.setPTT(false); tuning = false
         // Persist the current TX offset / drive for next launch.
         config.txOffsetHz = txOffsetHz
         config.txDriveDb = txLevelDb
@@ -182,7 +184,8 @@ final class App {
                 }
                 let c = byte
                 Task { @MainActor in self.handleKey(c) }
-                if c == UInt8(ascii: "q") || c == 3 { return } // q or Ctrl-C
+                // Keep reading until the process exits — do NOT stop on 'q',
+                // which is context-dependent (it cancels settings, etc.).
             }
             // EOF / closed stdin (e.g. piped or non-interactive): quit cleanly.
             Task { @MainActor in self.handleKey(UInt8(ascii: "q")) }
@@ -192,9 +195,11 @@ final class App {
     }
 
     private func handleKey(_ c: UInt8) {
+        // Ctrl-C always quits (and the quit path un-keys), from any mode.
+        if c == 3 { quit?.resume(); quit = nil; return }
         if mode == .settings { settingsKey(c); return }
         switch c {
-        case UInt8(ascii: "q"), 3:
+        case UInt8(ascii: "q"):
             quit?.resume(); quit = nil
         case UInt8(ascii: "s"), UInt8(ascii: "S"):
             openSettings()
@@ -236,6 +241,12 @@ final class App {
     // ---- Settings panel ------------------------------------------------------
 
     private func openSettings() {
+        // Never enter settings while keyed — stop the tone and un-key first.
+        if tuning { Task { await stopTune(); openSettingsNow() }; return }
+        openSettingsNow()
+    }
+
+    private func openSettingsNow() {
         let serials = ((try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? [])
             .filter { $0.hasPrefix("cu.") && ($0.contains("usb") || $0.contains("serial")) }
             .map { "/dev/\($0)" }.sorted()
@@ -277,8 +288,8 @@ final class App {
         }
         switch c {
         case 13, 10: ed.activate()                     // Enter: edit text / cycle choice
-        case UInt8(ascii: "s"), 0x13: applySettings()  // s or Ctrl-S
-        case UInt8(ascii: "q"), 3: closeSettings()     // q: cancel
+        case UInt8(ascii: "s"): applySettings()        // s: save
+        case UInt8(ascii: "q"): closeSettings()        // q: cancel
         default: break
         }
         render()
