@@ -477,8 +477,8 @@ final class App {
         // the meter still catching up to a rising level. Each step is logged so
         // the actual power curve is visible.
         logNote("\(Terminal.dim)── auto-tune sweep ──\(Terminal.reset)")
-        let startDb: Float = -30   // power is already meaningful here; skip dead low end
-        let maxDb: Float = -13
+        let startDb: Float = -34   // start low, but sweep up far enough for low-gain rigs
+        let maxDb: Float = -3
         let stepDb: Float = 2
         var samples: [(db: Float, power: Float, alc: Float)] = []
         var db = startDb
@@ -503,6 +503,16 @@ final class App {
         // Report the power MEASURED AT that step (no fresh read after dropping the
         // level — that catches the meter mid-transition and reads near zero).
         let maxPower = samples.map(\.power).max() ?? 0
+
+        // No power even at full drive → audio isn't reaching the rig's modulator.
+        if maxPower <= 0 {
+            await stopTune()
+            notice = "auto-tune: no RF at any drive — check the rig's USB audio is the TX "
+                + "source and the Mac output volume for the codec is up (--list-audio)."
+            render()
+            return
+        }
+
         let target = maxPower * 0.97
         let pick = samples.first(where: { $0.power >= target })
             ?? samples.max(by: { $0.power < $1.power })

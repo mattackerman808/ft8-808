@@ -50,6 +50,10 @@ public final class TxAudioOutput: @unchecked Sendable {
                 throw OutputError.deviceNotFound(q)
             }
             try setOutputDevice(dev.id)
+            // Push the codec's output volume to max so a low macOS device volume
+            // can't silently attenuate the TX audio (our drive level is the only
+            // software gain stage; the rig's USB input gain is the other).
+            AudioDevices.setOutputVolumeMax(dev.id)
         }
 
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {

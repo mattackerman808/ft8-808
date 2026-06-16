@@ -118,6 +118,24 @@ public enum AudioDevices {
         return ids
     }
 
+    /// Raise a device's output volume to max on every settable channel (and the
+    /// main element). No-op for codecs with a fixed/unsettable level.
+    public static func setOutputVolumeMax(_ id: AudioDeviceID) {
+        for element: UInt32 in [0, 1, 2] {   // 0 = main, 1/2 = channels
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element)
+            guard AudioObjectHasProperty(id, &addr) else { continue }
+            var settable: DarwinBoolean = false
+            guard AudioObjectIsPropertySettable(id, &addr, &settable) == noErr, settable.boolValue
+            else { continue }
+            var vol: Float32 = 1.0
+            _ = AudioObjectSetPropertyData(id, &addr, 0, nil,
+                                           UInt32(MemoryLayout<Float32>.size), &vol)
+        }
+    }
+
     private static func transportName(_ id: AudioDeviceID) -> String {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyTransportType,
