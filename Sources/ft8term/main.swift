@@ -954,9 +954,21 @@ do {
     }
 }
 
-let audioDevice = config.audioInput
-// Tune output: explicit --out, else the same codec we capture from (the rig).
-let outDevice = config.audioOutput ?? config.audioInput
+// Resolve an audio device: use the configured one if it's actually present,
+// otherwise auto-detect the rig's USB codec. So TX audio reaches the rig by
+// default (not the Mac speakers), and a swapped rig is picked up automatically.
+func rigCodec(scope: AudioDevices.Scope) -> String? {
+    AudioDevices.devices(scope: scope).first {
+        $0.transport == "USB" && !$0.manufacturer.lowercased().contains("apple")
+    }?.name
+}
+func resolveAudio(_ configured: String?, scope: AudioDevices.Scope) -> String? {
+    let devices = AudioDevices.devices(scope: scope)
+    if let c = configured, devices.contains(where: { $0.name == c }) { return c }
+    return rigCodec(scope: scope)
+}
+let audioDevice = resolveAudio(config.audioInput, scope: .input)
+let outDevice = resolveAudio(config.audioOutput ?? config.audioInput, scope: .output)
 
 // A WAV path argument decodes that recording; with no path we go live (default).
 let source: any AudioSource
