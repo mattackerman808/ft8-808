@@ -743,16 +743,18 @@ final class App {
 func usage() -> Never {
     FileHandle.standardError.write(Data("""
     usage:
-      ft8term <file.wav> [--ft4] [--rig <spec>]      decode a recording
-      ft8term --live [--audio <name>] [--ft4] [--rig <spec>] [--out <name>]   live receive
-      ft8term --list-audio                           list input devices
+      ft8term                       live receive (default)
+      ft8term <file.wav>            decode a recording instead
+      ft8term --list-audio          list input devices
 
-      <spec> = dummy | name-or-model[,device[,baud]]   (e.g. ftdx101d,/dev/cu...,38400)
-      --out  output device for Tune (defaults to the --audio device)
-      --call <CALL>  --grid <GRID>   set your station (persisted)
+      options (saved to ~/.config/ft8-808/config.json):
+        --call <CALL>  --grid <GRID>     your station
+        --rig <spec>                     dummy | name-or-model[,device[,baud]]
+                                         e.g. ftdx101d,/dev/cu.usbserial-0,38400
+        --audio <name>   --out <name>    capture / TX device (rig codec)
+        --ft4 | --ft8                    protocol
 
-    Flags are saved to ~/.config/ft8-808/config.json, so once set you can just
-    run: ft8term --live
+    Configure once, then just run: ft8term
 
     In the live view:
       ←/→ or ,/.   move TX cursor (offset)      <  >   coarse
@@ -770,7 +772,7 @@ func errExit(_ msg: String) -> Never {
 }
 
 let args = CommandLine.arguments
-guard args.count >= 2 else { usage() }
+if args.contains("--help") || args.contains("-h") { usage() }
 
 func flagValue(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
@@ -789,13 +791,13 @@ if args.contains("--list-audio") {
             let star = (d.id == defID) ? " (default)" : ""
             print("  \(d.name)  [\(d.channels) ch]\(star)\n    uid: \(d.uid)")
         }
-        print("\nUse: ft8term --live --audio \"<name substring or uid>\"")
+        print("\nUse: ft8term --audio \"<name substring or uid>\"")
     }
     exit(0)
 }
 
 // Load persisted config and fold in any CLI overrides (which then persist, so
-// you can configure once with flags and just `ft8term --live` afterwards).
+// you can configure once with flags and just run `ft8term` afterwards).
 var config = ConfigStore.load()
 if let c = flagValue("--call")  { config.callsign = c.uppercased() }
 if let g = flagValue("--grid")  { config.grid = g.uppercased() }
@@ -827,21 +829,19 @@ let audioDevice = config.audioInput
 // Tune output: explicit --out, else the same codec we capture from (the rig).
 let outDevice = config.audioOutput ?? config.audioInput
 
-// Decide the audio source: --live (capture) or a WAV path.
-let live = args.contains("--live")
+// A WAV path argument decodes that recording; with no path we go live (default).
 let source: any AudioSource
 let sourceLabel: String
-if live {
-    source = LiveAudioSource(device: audioDevice)
-    sourceLabel = "live: \(audioDevice ?? "default input")"
-} else {
-    guard let path = positionals.first else { usage() }
+if let path = positionals.first {
     let wavURL = URL(fileURLWithPath: path)
     guard FileManager.default.fileExists(atPath: wavURL.path) else {
         errExit("file not found: \(wavURL.path)")
     }
     source = WavFileSource(url: wavURL)
     sourceLabel = wavURL.lastPathComponent
+} else {
+    source = LiveAudioSource(device: audioDevice)
+    sourceLabel = "live: \(audioDevice ?? "default input")"
 }
 
 func makeRig(spec: String?) async -> RigController {
