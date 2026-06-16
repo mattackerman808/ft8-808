@@ -67,9 +67,11 @@ final class App {
 
     private let interactive = isatty(STDIN_FILENO) == 1
 
+    private var clockTask: Task<Void, Never>?
+
     func run() async {
         rigState = await rig.state()
-        if interactive { startKeyReader(); startRigPoll() }
+        if interactive { startKeyReader(); startRigPoll(); startClock() }
         render()
         let engine = self.engine      // Sendable structs — safe to capture.
         let source = self.source
@@ -84,6 +86,7 @@ final class App {
             self.quit = c
         }
         // Always leave the rig in receive on the way out.
+        clockTask?.cancel(); clockTask = nil
         meterTask?.cancel(); meterTask = nil
         tx?.stop(); tx = nil
         if tuning { try? await rig.setPTT(false); tuning = false }
@@ -108,6 +111,17 @@ final class App {
         // In non-interactive/batch mode there is no key to wait for: exit once
         // the source is exhausted.
         if !interactive { quit?.resume(); quit = nil }
+    }
+
+    /// Animate the cycle bar / clock by re-rendering a few times a second.
+    private func startClock() {
+        clockTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let self else { return }
+                self.render()
+            }
+        }
     }
 
     /// Refresh the rig status line once a second so a real rig's freq/mode/PTT
@@ -312,7 +326,7 @@ final class App {
     private func render() {
         let (rows, cols) = Terminal.size()
         let width = max(40, cols)
-        var out = Terminal.clear
+        var out = Terminal.home()
 
         // Status line.
         let utc = Self.utcStamp()
@@ -324,6 +338,9 @@ final class App {
         out += Terminal.bold + Terminal.fg256(45) + " FT8-808 " + Terminal.reset
         out += Terminal.dim + " \(utc)  " + Terminal.reset
         out += rigLine + "\r\n"
+
+        // FT8 15 s cycle progress bar.
+        out += renderCycleBar(width: width) + "\r\n"
         out += rule(width)
 
         // Spectrum (8 rows tall).
@@ -332,7 +349,7 @@ final class App {
 
         // Band-activity header + log.
         out += Terminal.dim + "  dB   dt   freq  message" + Terminal.reset + "\r\n"
-        let headerRows = 4 // status, rule, rule already counted approx
+        let headerRows = 5 // status, cycle bar, rules
         let spectrumRows = 8
         let footerRows = 2
         let logCapacity = max(3, rows - (headerRows + spectrumRows + footerRows + 2))
@@ -367,6 +384,9 @@ final class App {
                 + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)   \(status)"
         }
 
+        // Smooth redraw: clear each line to EOL and wipe below, rather than a
+        // full-screen clear — avoids flicker at the cycle bar's refresh rate.
+        out = out.replacingOccurrences(of: "\r\n", with: "\u{001B}[K\r\n") + "\u{001B}[0J"
         Terminal.write(out)
     }
 
@@ -455,11 +475,30 @@ final class App {
         Terminal.dim + String(repeating: "─", count: min(width, 200)) + Terminal.reset + "\r\n"
     }
 
-    private static func utcStamp() -> String {
+    private static let utcFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss'Z'"
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss'Z'"
         f.timeZone = TimeZone(identifier: "UTC")
-        return f.string(from: Date())
+        return f
+    }()
+
+    private static func utcStamp() -> String {
+        utcFormatter.string(from: Date())
+    }
+
+    /// WSJT-X-style bar that fills over the current 15 s FT8 window (UTC-aligned).
+    private func renderCycleBar(width: Int) -> String {
+        let slot = 15.0
+        let sec = Date().timeIntervalSince1970.truncatingRemainder(dividingBy: slot)
+        let barWidth = max(10, min(width - 24, 64))
+        let filled = max(0, min(barWidth, Int((Double(barWidth) * sec / slot).rounded())))
+        let color = tuning ? Terminal.fg256(196) : Terminal.fg256(46)
+        let bar = color + String(repeating: "█", count: filled) + Terminal.reset
+                + Terminal.dim + String(repeating: "·", count: barWidth - filled) + Terminal.reset
+        let label = tuning ? "TX" : "RX"
+        return " \(Terminal.dim)cycle\(Terminal.reset) \(bar) "
+             + String(format: "%04.1f", sec) + "\(Terminal.dim)/15s\(Terminal.reset)  "
+             + "\(color)\(label)\(Terminal.reset)"
     }
 }
 
