@@ -187,12 +187,25 @@ final class App {
         let thread = Thread {
             var byte: UInt8 = 0
             while read(STDIN_FILENO, &byte, 1) == 1 {
-                if byte == 0x1B { // ESC — possible arrow key (ESC [ A/B/C/D)
-                    var b1: UInt8 = 0, b2: UInt8 = 0
-                    if read(STDIN_FILENO, &b1, 1) == 1, b1 == 0x5B,
-                       read(STDIN_FILENO, &b2, 1) == 1 {
-                        let dir = b2
-                        Task { @MainActor in self.handleArrow(dir) }
+                if byte == 0x1B { // ESC — arrow sequence (ESC [ A/B/C/D) or a lone Esc
+                    // Poll briefly so a bare Esc doesn't block waiting for a key.
+                    var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+                    if poll(&pfd, 1, 40) > 0, (pfd.revents & Int16(POLLIN)) != 0 {
+                        var b1: UInt8 = 0
+                        if read(STDIN_FILENO, &b1, 1) == 1 {
+                            if b1 == 0x5B {
+                                var b2: UInt8 = 0
+                                if read(STDIN_FILENO, &b2, 1) == 1 {
+                                    let dir = b2
+                                    Task { @MainActor in self.handleArrow(dir) }
+                                }
+                            } else {
+                                let other = b1
+                                Task { @MainActor in self.handleKey(27); self.handleKey(other) }
+                            }
+                        }
+                    } else {
+                        Task { @MainActor in self.handleKey(27) } // lone Esc
                     }
                     continue
                 }
@@ -288,9 +301,20 @@ final class App {
 
     private func settingsKey(_ c: UInt8) {
         guard let ed = settings else { return }
+        if ed.rigPicking {
+            switch c {
+            case 13, 10: ed.rigPickerChoose()
+            case 27, 9: ed.rigPickerCancel()           // Esc / Tab cancels
+            case 127, 8: ed.rigPickerBackspace()
+            case 32...126: ed.rigPickerType(Character(UnicodeScalar(c)))
+            default: break
+            }
+            render(); return
+        }
         if ed.editing {
             switch c {
             case 13, 10: ed.commitEdit()
+            case 27: ed.editing = false                // Esc: cancel edit
             case 127, 8: ed.backspace()
             case 32...126: ed.typeCharacter(Character(UnicodeScalar(c)))
             default: break
@@ -298,21 +322,33 @@ final class App {
             render(); return
         }
         switch c {
-        case 13, 10: ed.activate()                     // Enter: edit text / cycle choice
+        case 13, 10:
+            if ed.selected == ed.rigFieldIndex { ed.startRigPicker() }
+            else { ed.activate() }
+        case 27, UInt8(ascii: "q"): closeSettings()    // Esc / q: cancel
         case UInt8(ascii: "s"): applySettings()        // s: save
-        case UInt8(ascii: "q"): closeSettings()        // q: cancel
         default: break
         }
         render()
     }
 
     private func settingsArrow(_ dir: UInt8) {
-        guard let ed = settings, !ed.editing else { return }
+        guard let ed = settings else { return }
+        if ed.rigPicking {
+            switch dir {
+            case 0x41: ed.rigPickerMove(-1)
+            case 0x42: ed.rigPickerMove(1)
+            default: break
+            }
+            render(); return
+        }
+        guard !ed.editing else { return }
         switch dir {
         case 0x41: ed.moveSelection(-1)  // up
         case 0x42: ed.moveSelection(1)   // down
-        case 0x44: ed.cycle(-1)          // left
-        case 0x43: ed.cycle(1)           // right
+        case 0x44, 0x43:                 // left/right
+            if ed.selected == ed.rigFieldIndex { ed.startRigPicker() }
+            else { ed.cycle(dir == 0x44 ? -1 : 1) }
         default: break
         }
         render()
@@ -628,6 +664,8 @@ final class App {
     }
 
     private func renderSettings(_ ed: SettingsEditor) -> String {
+        if ed.rigPicking { return renderRigPicker(ed) }
+
         var out = Terminal.bold + Terminal.fg256(45) + " FT8-808 Settings" + Terminal.reset + "\r\n"
         out += rule(min(Terminal.size().cols, 60)) + "\r\n"
 
@@ -640,15 +678,14 @@ final class App {
             if selected && ed.editing {
                 value = "\(Terminal.fg256(231))\(ed.buffer)\(Terminal.fg256(201))▏\(Terminal.reset)"
             } else if selected {
-                // Hint the choice arrows for choice fields.
-                let v = ed.values[i]
+                let v = ed.displayValue(at: i)
                 if case .choice = field.kind {
                     value = "\(Terminal.fg256(231))‹ \(v) ›\(Terminal.reset)"
                 } else {
                     value = "\(Terminal.fg256(231))\(v)\(Terminal.reset)"
                 }
             } else {
-                value = "\(Terminal.dim)\(ed.values[i])\(Terminal.reset)"
+                value = "\(Terminal.dim)\(ed.displayValue(at: i))\(Terminal.reset)"
             }
             out += "  \(marker) \(Terminal.dim)\(label)\(Terminal.reset)  \(value)\r\n"
         }
@@ -669,6 +706,35 @@ final class App {
                 + "\(Terminal.bold)[Enter]\(Terminal.reset) edit  "
                 + "\(Terminal.bold)[S]\(Terminal.reset)ave  \(Terminal.bold)[Q]\(Terminal.reset) cancel"
         }
+        return out
+    }
+
+    private func renderRigPicker(_ ed: SettingsEditor) -> String {
+        let (rows, _) = Terminal.size()
+        var out = Terminal.bold + Terminal.fg256(45) + " Select rig" + Terminal.reset
+            + "  \(Terminal.dim)type to filter · ↑↓ select · Enter choose · Esc cancel\(Terminal.reset)\r\n"
+        out += rule(min(Terminal.size().cols, 64)) + "\r\n"
+        out += "  \(Terminal.dim)filter:\(Terminal.reset) \(Terminal.fg256(231))\(ed.rigQuery)\(Terminal.fg256(201))▏\(Terminal.reset)\r\n\r\n"
+
+        let filtered = ed.filteredRigs
+        if filtered.isEmpty {
+            out += "  \(Terminal.dim)(no matching rigs)\(Terminal.reset)\r\n"
+            return out
+        }
+        // Scrolling viewport around the selection.
+        let visible = max(5, rows - 9)
+        var start = max(0, ed.rigSelected - visible / 2)
+        start = min(start, max(0, filtered.count - visible))
+        let end = min(filtered.count, start + visible)
+        for i in start..<end {
+            let r = filtered[i]
+            let sel = i == ed.rigSelected
+            let marker = sel ? "\(Terminal.fg256(45))▸\(Terminal.reset)" : " "
+            let color = sel ? Terminal.fg256(231) : Terminal.dim
+            out += "  \(marker) \(color)\(r.displayName)\(Terminal.reset)"
+                + "  \(Terminal.dim)[\(r.status)] #\(r.model)\(Terminal.reset)\r\n"
+        }
+        out += "\r\n  \(Terminal.dim)\(filtered.count) of \(SettingsEditor.rigs().count) rigs\(Terminal.reset)\r\n"
         return out
     }
 

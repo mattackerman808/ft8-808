@@ -22,9 +22,24 @@ final class SettingsEditor {
     var editing = false
     var buffer = ""
 
+    // Rig picker sub-state (the rig list is far too long to cycle through).
+    let rigFieldIndex: Int
+    var rigPicking = false
+    var rigQuery = ""
+    var rigSelected = 0
+
     private let serialPorts: [SerialPort]
     private let inputDevices: [AudioInputDevice]
     private let outputDevices: [AudioInputDevice]
+
+    /// All Hamlib rigs, loaded once and cached across panel opens.
+    private static var rigCache: [HamlibRigModel]?
+    static func rigs() -> [HamlibRigModel] {
+        if let c = rigCache { return c }
+        let r = HamlibRigs.all()
+        rigCache = r
+        return r
+    }
 
     init(config: StationConfig, serialPorts: [SerialPort],
          inputDevices: [AudioInputDevice], outputDevices: [AudioInputDevice]) {
@@ -35,7 +50,7 @@ final class SettingsEditor {
         fields = [
             Field(label: "Call",      kind: .text),
             Field(label: "Grid",      kind: .text),
-            Field(label: "Rig",       kind: .choice(["none"] + RigSpec.aliases.keys.sorted())),
+            Field(label: "Rig",       kind: .choice(["none"])),   // selected via the rig picker
             Field(label: "Serial",    kind: .choice(["none"] + serialPorts.map(\.path))),
             Field(label: "Baud",      kind: .choice(["4800", "9600", "19200", "38400", "57600", "115200"])),
             Field(label: "Audio in",  kind: .choice(["default"] + inputDevices.map(\.name))),
@@ -43,7 +58,11 @@ final class SettingsEditor {
             Field(label: "Proto",     kind: .choice(["ft8", "ft4"])),
         ]
 
+        rigFieldIndex = 2
+
         let (rig, serial, baud) = Self.splitRig(config.rigSpec)
+        // Normalize the rig token to a model number (aliases → number) for the picker.
+        let rigValue = rig.isEmpty ? "none" : (RigSpec.aliases[rig.lowercased()].map(String.init) ?? rig)
 
         // Auto-detect: use the saved value only if that device/port is still
         // present; otherwise pick the likely rig (handles a swapped/unplugged rig).
@@ -66,7 +85,7 @@ final class SettingsEditor {
         values = [
             config.callsign,
             config.grid,
-            rig.isEmpty ? "none" : rig,
+            rigValue,
             serialValue,
             baud.isEmpty ? "38400" : baud,
             inValue,
@@ -107,6 +126,53 @@ final class SettingsEditor {
 
     func typeCharacter(_ c: Character) { buffer.append(c) }
     func backspace() { if !buffer.isEmpty { buffer.removeLast() } }
+
+    // MARK: rig picker
+
+    var filteredRigs: [HamlibRigModel] {
+        let all = Self.rigs()
+        guard !rigQuery.isEmpty else { return all }
+        let q = rigQuery.lowercased()
+        return all.filter { $0.displayName.lowercased().contains(q) || String($0.model) == q }
+    }
+
+    func startRigPicker() {
+        rigPicking = true
+        rigQuery = ""
+        // Start the cursor on the current rig if any.
+        if let model = Int(values[rigFieldIndex]),
+           let idx = filteredRigs.firstIndex(where: { $0.model == model }) {
+            rigSelected = idx
+        } else {
+            rigSelected = 0
+        }
+    }
+
+    func rigPickerType(_ c: Character) { rigQuery.append(c); rigSelected = 0 }
+    func rigPickerBackspace() { if !rigQuery.isEmpty { rigQuery.removeLast(); rigSelected = 0 } }
+    func rigPickerMove(_ d: Int) {
+        let n = filteredRigs.count
+        if n > 0 { rigSelected = max(0, min(n - 1, rigSelected + d)) }
+    }
+    func rigPickerChoose() {
+        let f = filteredRigs
+        if rigSelected < f.count { values[rigFieldIndex] = String(f[rigSelected].model) }
+        rigPicking = false
+    }
+    func rigPickerCancel() { rigPicking = false }
+
+    /// Display string for a field's value (the Rig field shows the rig name).
+    func displayValue(at index: Int) -> String {
+        if index == rigFieldIndex {
+            let v = values[index]
+            if v == "none" { return "none" }
+            if let model = Int(v), let r = Self.rigs().first(where: { $0.model == model }) {
+                return r.displayName
+            }
+            return v
+        }
+        return values[index]
+    }
 
     // MARK: detail line for the selected field
 
