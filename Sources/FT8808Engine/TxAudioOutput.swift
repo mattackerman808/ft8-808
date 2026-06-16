@@ -56,16 +56,22 @@ public final class TxAudioOutput: @unchecked Sendable {
             AudioDevices.setOutputVolumeMax(dev.id)
         }
 
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
+        // Stereo so the tone lands on BOTH channels — rigs differ in which USB
+        // audio channel they read for TX, and a mono upmix can miss it.
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
             throw OutputError.formatUnavailable
         }
 
         let gen = generator
         let src = AVAudioSourceNode(format: format) { _, _, frameCount, ablPtr -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(ablPtr)
-            guard let mData = abl.first?.mData else { return noErr }
-            let ptr = mData.assumingMemoryBound(to: Float.self)
-            gen.render(UnsafeMutableBufferPointer(start: ptr, count: Int(frameCount)))
+            guard let first = abl.first?.mData else { return noErr }
+            let n = Int(frameCount)
+            // Render the tone into channel 0, then copy to the rest (L = R).
+            gen.render(UnsafeMutableBufferPointer(start: first.assumingMemoryBound(to: Float.self), count: n))
+            for i in 1..<abl.count {
+                if let d = abl[i].mData { memcpy(d, first, n * MemoryLayout<Float>.size) }
+            }
             return noErr
         }
         sourceNode = src
