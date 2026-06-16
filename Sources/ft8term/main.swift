@@ -821,6 +821,20 @@ if args.contains("--list-audio") {
     exit(0)
 }
 
+// --list-rigs: print all Hamlib-supported rigs (optionally filtered by a term).
+if args.contains("--list-rigs") {
+    let term = flagValue("--list-rigs")?.lowercased()
+    let rigs = HamlibRigs.all().filter { rig in
+        guard let term, !term.isEmpty else { return true }
+        return rig.displayName.lowercased().contains(term)
+    }
+    print("Hamlib rigs (\(rigs.count)):\n")
+    for r in rigs {
+        print("  \(String(r.model))\t\(r.displayName)  [\(r.status)]")
+    }
+    exit(0)
+}
+
 // --list-serial: print serial ports with USB identity, flag the likely CAT port.
 if args.contains("--list-serial") {
     let ports = SerialPorts.list()

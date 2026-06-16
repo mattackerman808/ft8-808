@@ -164,3 +164,25 @@ int ft8808_rig_set_rf_power(ft8808_rig* r, float frac) {
 const char* ft8808_rig_strerror(int errcode) {
     return rigerror(errcode);
 }
+
+struct ft8808_rig_collect { ft8808_rig_model* out; int count; int max; };
+
+static int ft8808_rig_collect_cb(const struct rig_caps* caps, rig_ptr_t data) {
+    struct ft8808_rig_collect* ctx = (struct ft8808_rig_collect*)data;
+    if (caps != NULL && ctx->count < ctx->max) {
+        ft8808_rig_model* m = &ctx->out[ctx->count++];
+        m->model = (int)caps->rig_model;
+        m->status = (int)caps->status;
+        snprintf(m->mfg, sizeof(m->mfg), "%s", caps->mfg_name ? caps->mfg_name : "");
+        snprintf(m->name, sizeof(m->name), "%s", caps->model_name ? caps->model_name : "");
+    }
+    return 1; // continue iterating
+}
+
+int ft8808_list_rigs(ft8808_rig_model* out, int max_out) {
+    if (out == NULL || max_out <= 0) return 0;
+    rig_load_all_backends();
+    struct ft8808_rig_collect ctx = { out, 0, max_out };
+    rig_list_foreach(ft8808_rig_collect_cb, &ctx);
+    return ctx.count;
+}

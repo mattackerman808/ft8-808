@@ -68,6 +68,18 @@ int ft8808_rig_get_meters(ft8808_rig* r, ft8808_meters* out);
 int ft8808_rig_get_rf_power(ft8808_rig* r, float* out);
 int ft8808_rig_set_rf_power(ft8808_rig* r, float frac);
 
+// A Hamlib-supported rig model (for the picker).
+typedef struct {
+    int  model;       // Hamlib rig model number
+    int  status;      // 0=alpha 1=untested 2=beta 3=stable 4=buggy
+    char mfg[40];     // manufacturer, e.g. "Yaesu"
+    char name[80];    // model name, e.g. "FTDX-101D"
+} ft8808_rig_model;
+
+// Enumerate all Hamlib-supported rigs into out[]. Returns the count written
+// (capped at max_out). Loads all backends first.
+int ft8808_list_rigs(ft8808_rig_model* out, int max_out);
+
 // Human-readable text for a Hamlib error code.
 const char* ft8808_rig_strerror(int errcode);
 
