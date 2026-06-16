@@ -150,9 +150,13 @@ int ft8808_rig_get_meters(ft8808_rig* r, ft8808_meters* out) {
     if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_SWR, &v) == RIG_OK) {
         out->has_swr = 1; out->swr = v.f;
     }
-    if (rig_get_level(r->rig, RIG_VFO_CURR, RIG_LEVEL_RFPOWER, &v) == RIG_OK) {
-        out->has_rfpower_set = 1; out->rfpower_set = v.f;
-    }
+    // NOTE: deliberately do NOT read RIG_LEVEL_RFPOWER (the power-ceiling
+    // SETTING) here. On Kenwood (TS-590S/SG, etc.) get_level(RFPOWER) runs a
+    // destructive min/max probe ("PC;PC000;PC;PC255;PC;PC000;") whenever PTT is
+    // off, which leaves the rig at PC000 → clamped to its 5 W minimum, silently
+    // overwriting the operator's chosen power every time we poll meters during
+    // RX (Hamlib issue #1595). The setting is only cosmetic for us, so skip it.
+    // out->has_rfpower_set stays 0 (memset above).
     return RIG_OK;
 }
 
