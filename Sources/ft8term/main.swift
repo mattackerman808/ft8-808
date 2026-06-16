@@ -54,6 +54,7 @@ final class App {
     private var notice: String? { didSet { noticeSetAt = (notice == nil) ? nil : Date() } }
     private var noticeSetAt: Date?
     private var autoTuning = false
+    private var savedMode: RigMode?   // rig mode to restore after TX (data-mode routing)
 
     // Settings panel.
     private enum Mode { case receive, settings }
@@ -393,6 +394,12 @@ final class App {
         // Release the rig's USB codec from capture before the TX engine grabs it.
         liveSource?.suspend()
 
+        // Route rear/USB audio for TX (e.g. TS-590SG uses the front mic in plain
+        // USB mode and ignores USB audio; Data-USB/PKTUSB uses the rear input —
+        // this is what WSJT-X's "Rear/Data" does). Restore the mode on stop.
+        savedMode = (await rig.state()).mode
+        if savedMode != .data { try? await rig.setMode(.data) }
+
         let out = TxAudioOutput(frequencyHz: txOffsetHz, device: outDevice)
         out.amplitude = Self.amplitude(fromDb: txLevelDb)
         do {
@@ -401,6 +408,7 @@ final class App {
         } catch {
             out.stop()
             try? await rig.setPTT(false)
+            if let m = savedMode { try? await rig.setMode(m); savedMode = nil }
             liveSource?.resume()        // restore capture if tune couldn't start
             notice = "tune failed: \(error)"
             render()
@@ -424,6 +432,7 @@ final class App {
         tx?.stop()
         tx = nil
         try? await rig.setPTT(false)
+        if let m = savedMode { try? await rig.setMode(m); savedMode = nil }  // restore mode
         liveSource?.resume()            // bring receive audio back
         tuning = false
         rigState.transmitting = false
