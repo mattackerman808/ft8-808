@@ -226,27 +226,12 @@ final class App {
         render()
     }
 
-    /// Auto-pick the quietest ~50 Hz slice for transmitting, using the busy map.
+    /// Auto-pick a clear, usable, central ~50 Hz slice from the busy map.
     private func autoPickTxFrequency() {
         let spec = avgSpectrum.isEmpty ? spectrum : avgSpectrum
-        guard spec.count > 4 else { notice = "no spectrum yet — wait for a slot"; render(); return }
-
-        let cols = spec.count
-        let span = passband.upperBound - passband.lowerBound
-        let win = max(1, Int((50.0 / span) * Float(cols)))      // ~50 Hz in columns
-
-        // Prefix sums → fast sliding-window energy.
-        var prefix = [Float](repeating: 0, count: cols + 1)
-        for i in 0..<cols { prefix[i + 1] = prefix[i] + spec[i] }
-
-        var bestStart = 0
-        var bestEnergy = Float.greatestFiniteMagnitude
-        for start in 0...(cols - win) {
-            let e = prefix[start + win] - prefix[start]
-            if e < bestEnergy { bestEnergy = e; bestStart = start }
+        guard let hz = FrequencyPicker.clearOffset(busyMap: spec, passband: passband) else {
+            notice = "no spectrum yet — wait for a slot"; render(); return
         }
-        let centerCol = Float(bestStart) + Float(win) / 2
-        let hz = passband.lowerBound + (centerCol / Float(cols)) * span
         setTxOffset(hz)
         notice = "auto-pick → TX \(Int(txOffsetHz)) Hz"
     }
