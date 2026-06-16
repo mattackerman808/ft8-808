@@ -29,9 +29,12 @@ final class App {
     let rig: RigController
     let sourceLabel: String
     let outDevice: String?
-    let tuneFreq: Float
+    let spectrumCols: Int
 
     private var spectrum: [Float] = []
+    private var avgSpectrum: [Float] = []          // rolling busy map for auto-pick
+    private var passband: ClosedRange<Float> = 200...3000
+    private var txOffsetHz: Float                  // where the TX cursor / tone sits
     private var activity: [ActivityLine] = []
     private var slotCount = 0
     private var finished = false
@@ -54,15 +57,17 @@ final class App {
     }
 
     init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController,
-         outDevice: String?, tuneFreq: Float = 1500) {
+         outDevice: String?, txOffsetHz: Float = 1500) {
         let (rows, cols) = Terminal.size()
         _ = rows
-        self.engine = DecodeEngine(proto: proto, spectrumColumns: max(20, cols - 2))
+        let columns = max(20, cols - 2)
+        self.engine = DecodeEngine(proto: proto, spectrumColumns: columns)
+        self.spectrumCols = columns
         self.source = source
         self.rig = rig
         self.sourceLabel = label
         self.outDevice = outDevice
-        self.tuneFreq = tuneFreq
+        self.txOffsetHz = txOffsetHz
     }
 
     private let interactive = isatty(STDIN_FILENO) == 1
@@ -99,6 +104,18 @@ final class App {
         guard !tuning else { return }
         slotCount += 1
         spectrum = r.spectrum
+        passband = r.passband
+
+        // Maintain a rolling "busy map" (exponential moving average) so auto-pick
+        // sees recent occupancy, not just one noisy slot.
+        if avgSpectrum.count != r.spectrum.count {
+            avgSpectrum = r.spectrum
+        } else {
+            for i in avgSpectrum.indices {
+                avgSpectrum[i] = avgSpectrum[i] * 0.6 + r.spectrum[i] * 0.4
+            }
+        }
+
         for m in r.messages.sorted(by: { $0.score > $1.score }) {
             activity.append(ActivityLine(slot: r.index, message: m))
         }
@@ -142,6 +159,15 @@ final class App {
         let thread = Thread {
             var byte: UInt8 = 0
             while read(STDIN_FILENO, &byte, 1) == 1 {
+                if byte == 0x1B { // ESC — possible arrow key (ESC [ A/B/C/D)
+                    var b1: UInt8 = 0, b2: UInt8 = 0
+                    if read(STDIN_FILENO, &b1, 1) == 1, b1 == 0x5B,
+                       read(STDIN_FILENO, &b2, 1) == 1 {
+                        let dir = b2
+                        Task { @MainActor in self.handleArrow(dir) }
+                    }
+                    continue
+                }
                 let c = byte
                 Task { @MainActor in self.handleKey(c) }
                 if c == UInt8(ascii: "q") || c == 3 { return } // q or Ctrl-C
@@ -165,9 +191,64 @@ final class App {
             if tuning && !autoTuning { setLevelDb(txLevelDb - 1) }
         case UInt8(ascii: "a"), UInt8(ascii: "A"):
             if !autoTuning { Task { await autoTune() } }
+        case UInt8(ascii: ","):                 // TX cursor: fine left
+            setTxOffset(txOffsetHz - 10)
+        case UInt8(ascii: "."):                 // fine right
+            setTxOffset(txOffsetHz + 10)
+        case UInt8(ascii: "<"):                 // coarse left
+            setTxOffset(txOffsetHz - 100)
+        case UInt8(ascii: ">"):                 // coarse right
+            setTxOffset(txOffsetHz + 100)
+        case UInt8(ascii: "f"), UInt8(ascii: "F"):
+            autoPickTxFrequency()
         default:
             break
         }
+    }
+
+    /// Arrow keys: ←/→ move the TX cursor (fine), ↑/↓ move it coarse.
+    private func handleArrow(_ dir: UInt8) {
+        switch dir {
+        case 0x44: setTxOffset(txOffsetHz - 10)   // left
+        case 0x43: setTxOffset(txOffsetHz + 10)   // right
+        case 0x41: setTxOffset(txOffsetHz + 100)  // up
+        case 0x42: setTxOffset(txOffsetHz - 100)  // down
+        default: break
+        }
+    }
+
+    /// Move the TX cursor, keeping room for the ~50 Hz signal inside the passband.
+    private func setTxOffset(_ hz: Float) {
+        let lo = passband.lowerBound
+        let hi = passband.upperBound - 60
+        txOffsetHz = (max(lo, min(hi, hz)) / 5).rounded() * 5   // snap to 5 Hz
+        tx?.setFrequency(txOffsetHz)                            // follow live while tuning
+        render()
+    }
+
+    /// Auto-pick the quietest ~50 Hz slice for transmitting, using the busy map.
+    private func autoPickTxFrequency() {
+        let spec = avgSpectrum.isEmpty ? spectrum : avgSpectrum
+        guard spec.count > 4 else { notice = "no spectrum yet — wait for a slot"; render(); return }
+
+        let cols = spec.count
+        let span = passband.upperBound - passband.lowerBound
+        let win = max(1, Int((50.0 / span) * Float(cols)))      // ~50 Hz in columns
+
+        // Prefix sums → fast sliding-window energy.
+        var prefix = [Float](repeating: 0, count: cols + 1)
+        for i in 0..<cols { prefix[i + 1] = prefix[i] + spec[i] }
+
+        var bestStart = 0
+        var bestEnergy = Float.greatestFiniteMagnitude
+        for start in 0...(cols - win) {
+            let e = prefix[start + win] - prefix[start]
+            if e < bestEnergy { bestEnergy = e; bestStart = start }
+        }
+        let centerCol = Float(bestStart) + Float(win) / 2
+        let hz = passband.lowerBound + (centerCol / Float(cols)) * span
+        setTxOffset(hz)
+        notice = "auto-pick → TX \(Int(txOffsetHz)) Hz"
     }
 
     // ---- Tune (transmit-audio calibration) -----------------------------------
@@ -183,7 +264,7 @@ final class App {
         tuneBusy = true
         defer { tuneBusy = false }
 
-        let out = TxAudioOutput(frequencyHz: tuneFreq, device: outDevice)
+        let out = TxAudioOutput(frequencyHz: txOffsetHz, device: outDevice)
         out.amplitude = Self.amplitude(fromDb: txLevelDb)
         do {
             try out.start()
@@ -343,14 +424,15 @@ final class App {
         out += renderCycleBar(width: width) + "\r\n"
         out += rule(width)
 
-        // Spectrum (8 rows tall).
+        // Spectrum (8 rows tall) + TX frequency cursor row.
         out += renderSpectrum(height: 8, width: width)
+        out += renderTxCursor(width: width) + "\r\n"
         out += rule(width)
 
         // Band-activity header + log.
         out += Terminal.dim + "  dB   dt   freq  message" + Terminal.reset + "\r\n"
         let headerRows = 5 // status, cycle bar, rules
-        let spectrumRows = 8
+        let spectrumRows = 9 // 8 spectrum + TX cursor row
         let footerRows = 2
         let logCapacity = max(3, rows - (headerRows + spectrumRows + footerRows + 2))
         let shown = activity.suffix(logCapacity)
@@ -381,7 +463,8 @@ final class App {
                 ? "\(Terminal.fg256(244))done — \(activity.count) decode(s) over \(slotCount) slot(s)\(Terminal.reset)"
                 : "\(Terminal.dim)decoding…\(Terminal.reset)"
             out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[T]\(Terminal.reset)une  "
-                + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)   \(status)"
+                + "\(Terminal.bold)←/→\(Terminal.reset) TX  \(Terminal.bold)[F]\(Terminal.reset)ind  "
+                + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)  \(status)"
         }
 
         // Smooth redraw: clear each line to EOL and wipe below, rather than a
@@ -444,6 +527,18 @@ final class App {
         let stops = [21, 39, 51, 46, 226, 208, 196]
         let idx = min(stops.count - 1, max(0, Int(v * Float(stops.count))))
         return stops[idx]
+    }
+
+    /// A `▲` marker aligned under the waterfall column for the TX audio offset.
+    private func renderTxCursor(width: Int) -> String {
+        let cols = min(width, spectrumCols)
+        let span = passband.upperBound - passband.lowerBound
+        let frac = (txOffsetHz - passband.lowerBound) / span
+        let col = max(0, min(cols - 1, Int(frac * Float(cols))))
+        let pre = String(repeating: " ", count: col)
+        let post = String(repeating: " ", count: max(0, cols - col - 1))
+        return pre + Terminal.fg256(201) + "▲" + Terminal.reset + post
+            + "  " + Terminal.fg256(201) + "TX \(Int(txOffsetHz)) Hz" + Terminal.reset
     }
 
     /// Bar for the drive level mapped over −60…0 dBFS.
@@ -521,7 +616,11 @@ func usage() -> Never {
       <spec> = dummy | name-or-model[,device[,baud]]   (e.g. ftdx101d,/dev/cu...,38400)
       --out  output device for Tune (defaults to the --audio device)
 
-    In the live view: [T] tune (key TX + steady tone, +/- to set drive), [Q] quit.
+    In the live view:
+      ←/→ or ,/.   move TX cursor (offset)      <  >   coarse
+      F            auto-pick the quietest slice
+      T            tune (key TX + tone; +/- set drive; A auto-tune)
+      Q            quit
 
     """.utf8))
     exit(2)
@@ -617,6 +716,6 @@ signal(SIGTERM) { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exi
 let rig = await makeRig()
 Terminal.enableRawMode()
 let app = App(source: source, label: sourceLabel, proto: proto, rig: rig,
-              outDevice: outDevice, tuneFreq: tuneFreq)
+              outDevice: outDevice, txOffsetHz: tuneFreq)
 await app.run()
 Terminal.restore()

@@ -41,6 +41,9 @@ public final class TxAudioOutput: @unchecked Sendable {
         set { generator.amplitude = newValue }
     }
 
+    /// Change the tone frequency while playing (e.g. moving the TX cursor).
+    public func setFrequency(_ hz: Float) { generator.setFrequency(hz) }
+
     public func start() throws {
         if let q = deviceQuery {
             guard let dev = AudioDevices.find(q, scope: .output) else {

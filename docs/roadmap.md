@@ -65,6 +65,9 @@ macOS app later. See [architecture.md](architecture.md).
 - [x] Auto-tune (`A`): sweeps drive to the max-power / no-ALC knee using the CAT
       meters. (ALC threshold needs calibration against real FTDX-101D values.)
 - [ ] Verify tune/auto-tune on-air; persist the calibrated drive level.
+- [x] TX frequency cursor on the waterfall (←/→ or ,/. fine, <> coarse); tune
+      tone follows the cursor live. Auto-pick (`F`) finds the quietest ~50 Hz
+      slice from a rolling busy-map for collision-free transmitting.
 - [ ] On-air FT8 TX: play synthesized slot audio with PTT at the UTC boundary.
 - [ ] Close the loop: complete an automated QSO from `ft8term`.
 

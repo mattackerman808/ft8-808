@@ -8,12 +8,14 @@ import os
 /// guarded by an unfair lock because it's read on the real-time audio thread
 /// and written from the UI thread.
 public final class ToneGenerator: @unchecked Sendable {
-    private let phaseIncrement: Float
+    private let sampleRate: Float
     private var phase: Float = 0
     private let amp = OSAllocatedUnfairLock(initialState: Float(0))
+    private let inc = OSAllocatedUnfairLock(initialState: Float(0)) // phase increment per sample
 
     public init(frequencyHz: Float, sampleRate: Float) {
-        phaseIncrement = 2 * .pi * frequencyHz / sampleRate
+        self.sampleRate = sampleRate
+        inc.withLock { $0 = 2 * .pi * frequencyHz / sampleRate }
     }
 
     /// Output amplitude, clamped to `[0, 1]`. 0 = silence.
@@ -22,14 +24,20 @@ public final class ToneGenerator: @unchecked Sendable {
         set { amp.withLock { $0 = max(0, min(1, newValue)) } }
     }
 
+    /// Change the tone frequency live (phase stays continuous — no click).
+    public func setFrequency(_ hz: Float) {
+        inc.withLock { $0 = 2 * .pi * hz / sampleRate }
+    }
+
     /// Fill `out` with the next block of samples, advancing the phase.
     public func render(_ out: UnsafeMutableBufferPointer<Float>) {
         let a = amplitude
+        let step = inc.withLock { $0 }
         var p = phase
         let twoPi = 2 * Float.pi
         for i in out.indices {
             out[i] = sinf(p) * a
-            p += phaseIncrement
+            p += step
             if p >= twoPi { p -= twoPi }
         }
         phase = p
