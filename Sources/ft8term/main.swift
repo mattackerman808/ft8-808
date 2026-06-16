@@ -1010,6 +1010,17 @@ func makeRig(spec: String?) async -> (rig: RigController, warning: String?) {
 // On Ctrl-C / kill: drop PTT first (never leave the rig keyed), then restore.
 signal(SIGINT)  { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
 signal(SIGTERM) { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
+// On a crash (Swift trap, segfault…): un-key + restore the terminal so the
+// shell isn't left in raw mode (the staircased-output mess), then re-raise to
+// still get the backtrace.
+for crashSig in [SIGILL, SIGABRT, SIGSEGV, SIGBUS, SIGFPE, SIGTRAP] {
+    signal(crashSig) { s in
+        HamlibRigController.panicUnkey()
+        Terminal.restore()
+        signal(s, SIG_DFL)
+        raise(s)
+    }
+}
 
 let (rig, rigWarning) = await makeRig(spec: config.rigSpec)
 Terminal.enableRawMode()
