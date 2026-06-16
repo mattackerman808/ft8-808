@@ -16,10 +16,10 @@ import Darwin
 // Live audio capture and rig/TX control arrive in later increments; the rig
 // shown here is the MockRigController.
 
-// ---- A decoded line for the scrolling band-activity log ----------------------
+// ---- A line in the scrolling band-activity log (decode or note) --------------
 struct ActivityLine {
-    let slot: Int
-    let message: FT8Message
+    let text: String   // pre-formatted content
+    let cq: Bool       // highlight CQ calls
 }
 
 @MainActor
@@ -131,7 +131,11 @@ final class App {
         }
 
         for m in r.messages.sorted(by: { $0.score > $1.score }) {
-            activity.append(ActivityLine(slot: r.index, message: m))
+            let snr = String(format: "%+4.0f", m.snrDb)
+            let dt = String(format: "%+4.1f", m.timeSeconds)
+            let freq = String(format: "%4.0f", m.frequencyHz)
+            activity.append(ActivityLine(text: " \(snr) \(dt) \(freq)  \(m.text)",
+                                         cq: m.text.hasPrefix("CQ")))
         }
         render()
     }
@@ -420,11 +424,13 @@ final class App {
 
         func power(_ m: RigMeters?) -> Float { m?.powerWatts ?? ((m?.powerPercent ?? 0) * 100) }
 
-        // Sweep the full useful range with NO early break — the FTDX power meter
-        // lags over CAT, so a local "flat" reading is unreliable. We settle long
-        // enough for the meter to catch up, record the whole curve, then analyze.
-        let startDb: Float = -40
-        let maxDb: Float = -14   // ~2× the knee amplitude — enough to reach the ceiling
+        // Sweep up, no early break. The FTDX power meter lags over CAT, so per
+        // step we settle, then take TWO reads and keep the higher — that absorbs
+        // the meter still catching up to a rising level. Each step is logged so
+        // the actual power curve is visible.
+        logNote("\(Terminal.dim)── auto-tune sweep ──\(Terminal.reset)")
+        let startDb: Float = -30   // power is already meaningful here; skip dead low end
+        let maxDb: Float = -13
         let stepDb: Float = 2
         var samples: [(db: Float, power: Float, alc: Float)] = []
         var db = startDb
@@ -432,37 +438,40 @@ final class App {
         while db <= maxDb {
             if !tuning || Task.isCancelled { break }
             setLevelDb(db)
-            try? await Task.sleep(nanoseconds: 500_000_000) // let the slow CAT meter settle
-            let m = await rig.meters()
-            lastMeters = m
-            let p = power(m)
-            let alc = m?.alc ?? 0
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            let p1 = power(await rig.meters())
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            let m2 = await rig.meters()
+            lastMeters = m2
+            let p = max(p1, power(m2))        // keep the settled (higher) reading
+            let alc = m2?.alc ?? 0
             samples.append((db, p, alc))
-            notice = String(format: "auto-tune: %+.0f dBFS  %.0f W  ALC %.2f", db, p, alc)
+            logNote(String(format: "  %+.0f dBFS   %3.0f W   ALC %.2f", db, p, alc))
             render()
             db += stepDb
         }
 
-        // Target the POWER knee: the LOWEST drive that reaches ~97% of the peak
-        // seen across the WHOLE sweep. Full power with the least audio.
+        // Target the POWER knee: the LOWEST drive reaching ~97% of the peak seen.
+        // Report the power MEASURED AT that step (no fresh read after dropping the
+        // level — that catches the meter mid-transition and reads near zero).
         let maxPower = samples.map(\.power).max() ?? 0
         let target = maxPower * 0.97
         let pick = samples.first(where: { $0.power >= target })
             ?? samples.max(by: { $0.power < $1.power })
         let knee = pick?.db ?? txLevelDb
         let resultAlc = pick?.alc ?? 0
+        let kneePower = pick?.power ?? 0
 
         setLevelDb(knee)
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        lastMeters = await rig.meters()
-        let finalPower = power(lastMeters)
 
         // Calibration done — stop transmitting and persist the drive level.
         await stopTune()
         config.txDriveDb = txLevelDb
         saveConfig()
         notice = String(format: "auto-tune → %+.0f dBFS  ≈%.0f W  ALC %.2f  (TX off, saved)",
-                        knee, finalPower, resultAlc)
+                        knee, kneePower, resultAlc)
+        logNote(String(format: "\(Terminal.fg256(45))→ knee %+.0f dBFS  %.0f W  ALC %.2f\(Terminal.reset)",
+                       knee, kneePower, resultAlc))
         render()
     }
 
@@ -550,12 +559,12 @@ final class App {
     }
 
     private func format(_ line: ActivityLine) -> String {
-        let m = line.message
-        let snr = String(format: "%+4.0f", m.snrDb)
-        let dt = String(format: "%+4.1f", m.timeSeconds)
-        let freq = String(format: "%4.0f", m.frequencyHz)
-        let color = m.text.hasPrefix("CQ") ? Terminal.fg256(220) : Terminal.fg256(252)
-        return " \(snr) \(dt) \(freq)  \(color)\(m.text)\(Terminal.reset)"
+        let color = line.cq ? Terminal.fg256(220) : Terminal.fg256(252)
+        return "\(color)\(line.text)\(Terminal.reset)"
+    }
+
+    private func logNote(_ s: String) {
+        activity.append(ActivityLine(text: s, cq: false))
     }
 
     private func renderSpectrum(height: Int, width: Int) -> String {
