@@ -31,6 +31,7 @@ final class App {
     let sourceLabel: String
     let outDevice: String?
     let spectrumCols: Int
+    let proto: FT8Protocol
 
     private var config: StationConfig
     private var spectrum: [Float] = []
@@ -55,6 +56,13 @@ final class App {
     private var noticeSetAt: Date?
     private var autoTuning = false
 
+    // Transmit (CQ / QSO) state.
+    private var txEnabled = false             // master "Enable TX" trigger
+    private var txParity: SlotParity = .even  // which 15 s sequence we transmit in
+    private var txMessage: String?            // text queued for the next matching slot
+    private var txTask: Task<Void, Never>?    // slot-aligned scheduler loop
+    private var sending = false               // a waveform is on the air right now
+
     // Settings panel.
     private enum Mode { case receive, settings }
     private var mode: Mode = .receive
@@ -73,6 +81,7 @@ final class App {
         let columns = max(20, cols - 2)
         self.engine = DecodeEngine(proto: proto, spectrumColumns: columns)
         self.spectrumCols = columns
+        self.proto = proto
         self.source = source
         self.liveSource = source as? LiveAudioSource
         self.rig = rig
@@ -108,6 +117,7 @@ final class App {
         // Always leave the rig in receive on the way out.
         clockTask?.cancel(); clockTask = nil
         meterTask?.cancel(); meterTask = nil
+        disableTx()
         tx?.stop(); tx = nil
         // Unconditionally un-key on the way out — never depend on the tuning
         // flag (a half-started tune could have PTT on with tuning == false).
@@ -248,6 +258,12 @@ final class App {
             setTxOffset(txOffsetHz + 100)
         case UInt8(ascii: "f"), UInt8(ascii: "F"):
             autoPickTxFrequency()
+        case UInt8(ascii: "c"), UInt8(ascii: "C"):
+            callCQ()
+        case UInt8(ascii: "e"), UInt8(ascii: "E"):
+            toggleTx()
+        case UInt8(ascii: "o"), UInt8(ascii: "O"):
+            toggleParity()
         default:
             break
         }
@@ -387,6 +403,8 @@ final class App {
 
     private func startTune() async {
         guard !tuning, !tuneBusy else { return }
+        // Tune and message-TX both key the rig and own the codec — never both.
+        if txEnabled || sending { disableTx() }
         tuneBusy = true
         defer { tuneBusy = false }
 
@@ -450,6 +468,114 @@ final class App {
     private func setLevelDb(_ db: Float) {
         txLevelDb = max(-60, min(0, db))
         tx?.amplitude = Self.amplitude(fromDb: txLevelDb)
+        render()
+    }
+
+    // ---- Transmit: CQ + slot-aligned scheduling -----------------------------
+
+    /// `C` — load a CQ and start transmitting it each matching slot.
+    private func callCQ() {
+        guard requireStation() else { return }
+        if tuning { Task { await stopTune(); callCQ() }; return }
+        txMessage = QSOMessages.cq(call: config.callsign, grid: config.grid,
+                                   directive: config.cqDirective)
+        txEnabled = true
+        startTxLoop()
+        notice = "calling CQ on next \(txParity == .even ? "even" : "odd") slot"
+        render()
+    }
+
+    /// `E` — toggle the master Enable-TX trigger.
+    private func toggleTx() {
+        if txEnabled { disableTx(); notice = "TX disabled"; render(); return }
+        guard requireStation() else { return }
+        if tuning { Task { await stopTune(); toggleTx() }; return }
+        if txMessage == nil {
+            txMessage = QSOMessages.cq(call: config.callsign, grid: config.grid,
+                                       directive: config.cqDirective)
+        }
+        txEnabled = true
+        startTxLoop()
+        notice = "TX enabled"
+        render()
+    }
+
+    /// `O` — swap the even/odd transmit sequence.
+    private func toggleParity() {
+        txParity = txParity.toggled
+        notice = "TX slot: \(txParity.label)"
+        render()
+    }
+
+    private func requireStation() -> Bool {
+        if config.isStationSet { return true }
+        notice = "set your callsign & grid in [S]ettings first"
+        render()
+        return false
+    }
+
+    private func disableTx() {
+        txEnabled = false
+        txTask?.cancel(); txTask = nil
+    }
+
+    /// Slot-aligned scheduler: sleep to the next matching boundary, transmit the
+    /// queued message, repeat while enabled. Runs on the main actor (it only
+    /// ever suspends — the audio plays on the AUHAL thread).
+    private func startTxLoop() {
+        txTask?.cancel()
+        txTask = Task { [weak self] in
+            while let self, self.txEnabled, !Task.isCancelled {
+                let wait = SlotClock.secondsUntilNextSlot(parity: self.txParity, after: Date())
+                try? await Task.sleep(nanoseconds: UInt64(max(0, wait) * 1_000_000_000))
+                if Task.isCancelled || !self.txEnabled { break }
+                await self.transmitCurrentSlot()
+            }
+        }
+    }
+
+    /// Encode + synthesize the queued message and play it through the rig for
+    /// one slot, keyed via PTT. Audio starts at the slot boundary with a 0.5 s
+    /// lead so the first symbol lands at slot+0.5 s (DT ≈ 0 at receivers).
+    private func transmitCurrentSlot() async {
+        guard txEnabled, !tuning, !sending, let text = txMessage else { return }
+        let sr = 48_000
+        let body: [Float]
+        do {
+            let tones = try FT8Codec.encode(text, protocol: proto)
+            let msg = FT8Codec.synthesize(tones: tones, baseFrequencyHz: txOffsetHz,
+                                          protocol: proto, sampleRate: sr)
+            let lead = [Float](repeating: 0, count: sr / 2)   // 0.5 s
+            let tail = [Float](repeating: 0, count: sr / 10)  // 0.1 s guard
+            body = lead + msg + tail
+        } catch {
+            notice = "TX encode failed: \(error)"; disableTx(); render(); return
+        }
+
+        let player = WaveformPlayer(samples: body, amplitude: Self.amplitude(fromDb: txLevelDb))
+        let out = TxAudioOutput(player: player, sampleRate: Double(sr), device: outDevice)
+        liveSource?.suspend()                     // free the codec from capture
+        do {
+            try await rig.setPTT(true)
+            try out.start()
+        } catch {
+            out.stop(); try? await rig.setPTT(false); liveSource?.resume()
+            notice = "TX start failed: \(error)"; disableTx(); render(); return
+        }
+        sending = true
+        rigState.transmitting = true
+        activity.append(ActivityLine(text: " \(Terminal.fg256(196))Tx\(Terminal.reset)        \(text)", cq: false))
+        render()
+
+        // Wait out the slot; bail early if TX is disabled mid-transmission.
+        while !player.isFinished && txEnabled && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        out.stop()
+        try? await rig.setPTT(false)
+        liveSource?.resume()
+        sending = false
+        rigState.transmitting = false
         render()
     }
 
@@ -605,6 +731,16 @@ final class App {
                 + "\(Terminal.dim)(amp \(String(format: "%.3f", amp)))\(Terminal.reset)  "
                 + meterText()
                 + "  \(Terminal.dim)[+/-] [A]uto [T]stop\(Terminal.reset)"
+        } else if txEnabled {
+            // Prominent TX banner: on-air state, slot, and the queued message.
+            let onAir = sending
+                ? "\(Terminal.fg256(196))● ON AIR\(Terminal.reset)"
+                : "\(Terminal.fg256(208))○ TX armed\(Terminal.reset)"
+            let par = txParity == .even ? "even" : "odd"
+            out += " \(Terminal.bold)\(onAir)\(Terminal.reset)  "
+                + "\(Terminal.dim)\(par) slot\(Terminal.reset)  "
+                + "\(Terminal.fg256(45))\(txMessage ?? "")\(Terminal.reset)  "
+                + "\(Terminal.dim)[E]stop [O]slot\(Terminal.reset)"
         } else if let notice, let at = noticeSetAt, Date().timeIntervalSince(at) < 8 {
             // Show a transient notice (tune result, errors…) then revert to hints.
             out += " \(Terminal.fg256(208))\(notice)\(Terminal.reset)"
@@ -612,9 +748,10 @@ final class App {
             let status = finished
                 ? "\(Terminal.fg256(244))done — \(activity.count) decode(s) over \(slotCount) slot(s)\(Terminal.reset)"
                 : "\(Terminal.dim)decoding…\(Terminal.reset)"
-            out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[T]\(Terminal.reset)une  "
-                + "\(Terminal.bold)←/→\(Terminal.reset) TX  \(Terminal.bold)[F]\(Terminal.reset)ind  "
-                + "\(Terminal.bold)[S]\(Terminal.reset)ettings  "
+            out += " \(Terminal.bold)[Q]\(Terminal.reset)uit \(Terminal.bold)[C]\(Terminal.reset)Q "
+                + "\(Terminal.bold)[E]\(Terminal.reset)nableTX \(Terminal.bold)[O]\(Terminal.reset)slot "
+                + "\(Terminal.bold)[T]\(Terminal.reset)une \(Terminal.bold)[F]\(Terminal.reset)ind "
+                + "\(Terminal.bold)[S]\(Terminal.reset)et  "
                 + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)  \(status)"
         }
 

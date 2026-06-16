@@ -22,23 +22,39 @@ public final class TxAudioOutput: @unchecked Sendable {
         }
     }
 
-    fileprivate let toneGen: ToneGenerator
+    fileprivate let source: AudioRenderSource
+    private let toneGen: ToneGenerator?   // non-nil only for the tune-tone path
     private let sampleRate: Double
     private let deviceQuery: String?
     private var unit: AudioUnit?
 
+    /// Tune-tone output: a continuous sine whose amplitude/frequency are
+    /// adjustable live (drive calibration).
     public init(frequencyHz: Float = 1500, sampleRate: Double = 48_000, device: String? = nil) {
         self.sampleRate = sampleRate
         self.deviceQuery = device
-        self.toneGen = ToneGenerator(frequencyHz: frequencyHz, sampleRate: Float(sampleRate))
+        let tone = ToneGenerator(frequencyHz: frequencyHz, sampleRate: Float(sampleRate))
+        self.toneGen = tone
+        self.source = tone
     }
+
+    /// Message output: stream a pre-synthesized waveform (a full FT8 slot) once.
+    public init(player: WaveformPlayer, sampleRate: Double = 48_000, device: String? = nil) {
+        self.sampleRate = sampleRate
+        self.deviceQuery = device
+        self.toneGen = nil
+        self.source = player
+    }
+
+    /// True once a finite source (message waveform) has finished playing.
+    public var isFinished: Bool { source.isFinished }
 
     public var amplitude: Float {
-        get { toneGen.amplitude }
-        set { toneGen.amplitude = newValue }
+        get { toneGen?.amplitude ?? 0 }
+        set { toneGen?.amplitude = newValue }
     }
 
-    public func setFrequency(_ hz: Float) { toneGen.setFrequency(hz) }
+    public func setFrequency(_ hz: Float) { toneGen?.setFrequency(hz) }
 
     public func start() throws {
         // Resolve the target device (nil = system default output).
@@ -117,7 +133,7 @@ public final class TxAudioOutput: @unchecked Sendable {
         for buffer in abl {
             guard let mData = buffer.mData else { continue }
             let ptr = mData.assumingMemoryBound(to: Float.self)
-            toneGen.render(UnsafeMutableBufferPointer(start: ptr, count: Int(frames)))
+            source.render(UnsafeMutableBufferPointer(start: ptr, count: Int(frames)))
         }
     }
 }

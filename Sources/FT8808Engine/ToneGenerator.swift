@@ -7,11 +7,14 @@ import os
 /// so the waveform is unit-testable without any audio hardware. Amplitude is
 /// guarded by an unfair lock because it's read on the real-time audio thread
 /// and written from the UI thread.
-public final class ToneGenerator: @unchecked Sendable {
+public final class ToneGenerator: AudioRenderSource, @unchecked Sendable {
     private let sampleRate: Float
     private var phase: Float = 0
     private let amp = OSAllocatedUnfairLock(initialState: Float(0))
     private let inc = OSAllocatedUnfairLock(initialState: Float(0)) // phase increment per sample
+
+    /// A tune tone never ends on its own — it plays until `stop()`.
+    public var isFinished: Bool { false }
 
     public init(frequencyHz: Float, sampleRate: Float) {
         self.sampleRate = sampleRate
