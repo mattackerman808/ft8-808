@@ -26,9 +26,10 @@ struct ActivityLine {
 final class App {
     let engine: DecodeEngine
     let source: any AudioSource
-    let audioIO: AudioIO?   // non-nil in live mode; owns capture + TX tone
+    let liveSource: LiveAudioSource?   // non-nil in live mode; suspended during TX
     let rig: RigController
     let sourceLabel: String
+    let outDevice: String?
     let spectrumCols: Int
 
     private var config: StationConfig
@@ -44,6 +45,7 @@ final class App {
                                     transmitting: false, connected: true)
 
     // Tune (transmit-audio calibration) state.
+    private var tx: TxAudioOutput?
     private var tuning = false
     private var tuneBusy = false        // guards async start/stop transitions
     private var txLevelDb: Float = -40  // audio drive in dBFS (fine control)
@@ -62,16 +64,17 @@ final class App {
     }
 
     init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController,
-         config: StationConfig) {
+         outDevice: String?, config: StationConfig) {
         let (rows, cols) = Terminal.size()
         _ = rows
         let columns = max(20, cols - 2)
         self.engine = DecodeEngine(proto: proto, spectrumColumns: columns)
         self.spectrumCols = columns
         self.source = source
-        self.audioIO = source as? AudioIO
+        self.liveSource = source as? LiveAudioSource
         self.rig = rig
         self.sourceLabel = label
+        self.outDevice = outDevice
         self.config = config
         self.txOffsetHz = config.txOffsetHz
         self.txLevelDb = config.txDriveDb
@@ -100,7 +103,7 @@ final class App {
         // Always leave the rig in receive on the way out.
         clockTask?.cancel(); clockTask = nil
         meterTask?.cancel(); meterTask = nil
-        audioIO?.toneAmplitude = 0
+        tx?.stop(); tx = nil
         // Unconditionally un-key on the way out — never depend on the tuning
         // flag (a half-started tune could have PTT on with tuning == false).
         try? await rig.setPTT(false); tuning = false
@@ -315,7 +318,7 @@ final class App {
         let lo = passband.lowerBound
         let hi = passband.upperBound - 60
         txOffsetHz = (max(lo, min(hi, hz)) / 5).rounded() * 5   // snap to 5 Hz
-        audioIO?.setToneFrequency(txOffsetHz)                   // follow live while tuning
+        tx?.setFrequency(txOffsetHz)                            // follow live while tuning
         render()
     }
 
@@ -343,24 +346,26 @@ final class App {
 
     private func startTune() async {
         guard !tuning, !tuneBusy else { return }
-        guard let audioIO else {
-            notice = "tune needs live audio (run with --live)"
-            render(); return
-        }
         tuneBusy = true
         defer { tuneBusy = false }
 
-        // Same engine for RX and TX — just raise the tone and key PTT.
-        audioIO.setToneFrequency(txOffsetHz)
-        audioIO.toneAmplitude = Self.amplitude(fromDb: txLevelDb)
+        // Release the rig's USB codec from capture before the TX engine grabs it.
+        liveSource?.suspend()
+
+        let out = TxAudioOutput(frequencyHz: txOffsetHz, device: outDevice)
+        out.amplitude = Self.amplitude(fromDb: txLevelDb)
         do {
+            try out.start()
             try await rig.setPTT(true)
         } catch {
-            audioIO.toneAmplitude = 0
+            out.stop()
+            try? await rig.setPTT(false)
+            liveSource?.resume()        // restore capture if tune couldn't start
             notice = "tune failed: \(error)"
             render()
             return
         }
+        tx = out
         tuning = true
         rigState.transmitting = true
         notice = nil
@@ -375,8 +380,10 @@ final class App {
 
         meterTask?.cancel(); meterTask = nil
         lastMeters = nil
-        audioIO?.toneAmplitude = 0      // mute the tone (engine keeps running for RX)
+        tx?.stop()
+        tx = nil
         try? await rig.setPTT(false)
+        liveSource?.resume()            // bring receive audio back
         tuning = false
         rigState.transmitting = false
         render()
@@ -397,7 +404,7 @@ final class App {
 
     private func setLevelDb(_ db: Float) {
         txLevelDb = max(-60, min(0, db))
-        audioIO?.toneAmplitude = Self.amplitude(fromDb: txLevelDb)
+        tx?.amplitude = Self.amplitude(fromDb: txLevelDb)
         render()
     }
 
@@ -820,8 +827,7 @@ let live = args.contains("--live")
 let source: any AudioSource
 let sourceLabel: String
 if live {
-    source = AudioIO(captureDevice: audioDevice, playbackDevice: outDevice,
-                     toneFrequencyHz: config.txOffsetHz)
+    source = LiveAudioSource(device: audioDevice)
     sourceLabel = "live: \(audioDevice ?? "default input")"
 } else {
     guard let path = positionals.first else { usage() }
@@ -851,6 +857,6 @@ signal(SIGTERM) { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exi
 let rig = await makeRig(spec: config.rigSpec)
 Terminal.enableRawMode()
 let app = App(source: source, label: sourceLabel, proto: proto, rig: rig,
-              config: config)
+              outDevice: outDevice, config: config)
 await app.run()
 Terminal.restore()
