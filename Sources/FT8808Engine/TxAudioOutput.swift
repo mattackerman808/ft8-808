@@ -1,99 +1,137 @@
 import Foundation
-@preconcurrency import AVFoundation
+import AudioToolbox
 import CoreAudio
 
-/// Plays a continuous tone to a selectable output device (the rig's USB codec),
-/// for transmit-audio calibration ("tune"). Amplitude is adjustable live.
-///
-/// This is also the foundation of the FT8 transmit path: the same engine +
-/// output-device selection will later play synthesized FT8 audio instead of a
-/// steady tone.
+/// Transmit-audio output via a raw CoreAudio AUHAL output unit (the same low-
+/// level path Qt/PortAudio use — and what WSJT-X relies on). This targets a
+/// specific device directly with a single render callback, avoiding the
+/// AVAudioEngine graph (source→mixer→output) whose multi-stage format
+/// negotiation silently fails on some picky rig USB codecs.
 public final class TxAudioOutput: @unchecked Sendable {
     public enum OutputError: Error, CustomStringConvertible {
         case deviceNotFound(String)
-        case engineStartFailed(String)
-        case formatUnavailable
+        case unitUnavailable
+        case configFailed(String, OSStatus)
 
         public var description: String {
             switch self {
             case let .deviceNotFound(q):    return "audio output device not found: \(q)"
-            case let .engineStartFailed(m): return "audio engine failed to start: \(m)"
-            case .formatUnavailable:        return "could not create the output audio format"
+            case .unitUnavailable:          return "HAL output audio unit unavailable"
+            case let .configFailed(m, s):   return "audio output \(m) failed (OSStatus \(s))"
             }
         }
     }
 
-    private let engine = AVAudioEngine()
-    private let generator: ToneGenerator
+    fileprivate let toneGen: ToneGenerator
     private let sampleRate: Double
     private let deviceQuery: String?
-    private var sourceNode: AVAudioSourceNode?
+    private var unit: AudioUnit?
 
     public init(frequencyHz: Float = 1500, sampleRate: Double = 48_000, device: String? = nil) {
         self.sampleRate = sampleRate
         self.deviceQuery = device
-        self.generator = ToneGenerator(frequencyHz: frequencyHz, sampleRate: Float(sampleRate))
+        self.toneGen = ToneGenerator(frequencyHz: frequencyHz, sampleRate: Float(sampleRate))
     }
 
-    /// Output level in `[0, 1]`. Safe to change while playing.
     public var amplitude: Float {
-        get { generator.amplitude }
-        set { generator.amplitude = newValue }
+        get { toneGen.amplitude }
+        set { toneGen.amplitude = newValue }
     }
 
-    /// Change the tone frequency while playing (e.g. moving the TX cursor).
-    public func setFrequency(_ hz: Float) { generator.setFrequency(hz) }
+    public func setFrequency(_ hz: Float) { toneGen.setFrequency(hz) }
 
     public func start() throws {
+        // Resolve the target device (nil = system default output).
+        var deviceID: AudioDeviceID?
         if let q = deviceQuery {
-            guard let dev = AudioDevices.find(q, scope: .output) else {
-                throw OutputError.deviceNotFound(q)
-            }
-            try setOutputDevice(dev.id)
+            guard let dev = AudioDevices.find(q, scope: .output) else { throw OutputError.deviceNotFound(q) }
+            deviceID = dev.id
         }
 
-        // Mono, like WSJT-X (and like the config that drove the Yaesu).
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
-            throw OutputError.formatUnavailable
+        var desc = AudioComponentDescription(
+            componentType: kAudioUnitType_Output,
+            componentSubType: kAudioUnitSubType_HALOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0, componentFlagsMask: 0)
+        guard let comp = AudioComponentFindNext(nil, &desc) else { throw OutputError.unitUnavailable }
+        var au: AudioUnit?
+        var st = AudioComponentInstanceNew(comp, &au)
+        guard st == noErr, let unit = au else { throw OutputError.configFailed("create", st) }
+
+        func set(_ what: String, _ id: AudioUnitPropertyID, _ scope: AudioUnitScope,
+                 _ element: AudioUnitElement, _ value: UnsafeRawPointer, _ size: UInt32) throws {
+            let s = AudioUnitSetProperty(unit, id, scope, element, value, size)
+            if s != noErr { AudioComponentInstanceDispose(unit); throw OutputError.configFailed(what, s) }
         }
 
-        let gen = generator
-        let src = AVAudioSourceNode(format: format) { _, _, frameCount, ablPtr -> OSStatus in
-            let abl = UnsafeMutableAudioBufferListPointer(ablPtr)
-            guard let mData = abl.first?.mData else { return noErr }
-            let ptr = mData.assumingMemoryBound(to: Float.self)
-            gen.render(UnsafeMutableBufferPointer(start: ptr, count: Int(frameCount)))
-            return noErr
-        }
-        sourceNode = src
+        // Enable output (bus 0), disable input (bus 1).
+        var enable: UInt32 = 1
+        try set("enable output", kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
+                &enable, UInt32(MemoryLayout<UInt32>.size))
+        var disable: UInt32 = 0
+        _ = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1,
+                                 &disable, UInt32(MemoryLayout<UInt32>.size))
 
-        engine.attach(src)
-        engine.connect(src, to: engine.mainMixerNode, format: format)
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            throw OutputError.engineStartFailed(error.localizedDescription)
+        // Target a specific device.
+        if var dev = deviceID {
+            try set("set device", kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                    &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
         }
+
+        // The format WE provide: mono Float32 @ sampleRate. The AUHAL's built-in
+        // converter handles mono→device-channels and float→device-sample-type.
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
+            mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
+        try set("set format", kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+                &asbd, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
+
+        var cb = AURenderCallbackStruct(inputProc: txRenderCallback,
+                                        inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
+        try set("set callback", kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
+                &cb, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+
+        st = AudioUnitInitialize(unit)
+        guard st == noErr else { AudioComponentInstanceDispose(unit); throw OutputError.configFailed("initialize", st) }
+        st = AudioOutputUnitStart(unit)
+        guard st == noErr else {
+            AudioUnitUninitialize(unit); AudioComponentInstanceDispose(unit)
+            throw OutputError.configFailed("start", st)
+        }
+        self.unit = unit
     }
 
     public func stop() {
-        if engine.isRunning { engine.stop() }
-        if let src = sourceNode {
-            engine.detach(src)
-            sourceNode = nil
-        }
+        guard let unit else { return }
+        AudioOutputUnitStop(unit)
+        AudioUnitUninitialize(unit)
+        AudioComponentInstanceDispose(unit)
+        self.unit = nil
     }
 
-    private func setOutputDevice(_ id: AudioDeviceID) throws {
-        guard let unit = engine.outputNode.audioUnit else { return }
-        var dev = id
-        let st = AudioUnitSetProperty(unit,
-                                      kAudioOutputUnitProperty_CurrentDevice,
-                                      kAudioUnitScope_Global, 0,
-                                      &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
-        if st != noErr {
-            throw OutputError.engineStartFailed("could not select output device (OSStatus \(st))")
+    fileprivate func render(into ioData: UnsafeMutablePointer<AudioBufferList>, frames: UInt32) {
+        let abl = UnsafeMutableAudioBufferListPointer(ioData)
+        for buffer in abl {
+            guard let mData = buffer.mData else { continue }
+            let ptr = mData.assumingMemoryBound(to: Float.self)
+            toneGen.render(UnsafeMutableBufferPointer(start: ptr, count: Int(frames)))
         }
     }
+}
+
+// Real-time render callback (C function pointer). Pulls the tone from the
+// TxAudioOutput passed via the refcon.
+private func txRenderCallback(inRefCon: UnsafeMutableRawPointer,
+                              ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+                              inTimeStamp: UnsafePointer<AudioTimeStamp>,
+                              inBusNumber: UInt32,
+                              inNumberFrames: UInt32,
+                              ioData: UnsafeMutablePointer<AudioBufferList>?) -> OSStatus {
+    guard let ioData else { return noErr }
+    let txo = Unmanaged<TxAudioOutput>.fromOpaque(inRefCon).takeUnretainedValue()
+    txo.render(into: ioData, frames: inNumberFrames)
+    return noErr
 }
