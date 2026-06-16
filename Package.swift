@@ -94,7 +94,7 @@ let package = Package(
         ),
         .testTarget(
             name: "FT8808EngineTests",
-            dependencies: ["FT8808Engine"],
+            dependencies: ["FT8808Engine", "FT8Codec"],
             resources: [
                 .copy("Resources"),
             ]

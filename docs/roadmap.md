@@ -45,9 +45,17 @@ macOS app later. See [architecture.md](architecture.md).
 - [ ] Universal (arm64 + x86_64) dylib: `ARCHS="arm64 x86_64" build-hamlib.sh`.
 - [ ] Rig picker UI; code-sign the bundled dylib for notarised distribution.
 
-## Milestone 3 — QSO logic + logging
+## Milestone 3 — Station config, QSO UI + logging
+- [x] `StationConfig` + `ConfigStore` (JSON at ~/.config/ft8-808/config.json):
+      call, grid, rig, audio in/out, TX offset, calibrated drive, proto.
+- [x] `StandardMessages` — Tx1–6 macro set (reply-grid / report / R-report /
+      RR73 / 73 / CQ) from call+grid+DX+report; validated by encoding each.
+- [x] `ft8term`: load/persist config; `--call`/`--grid` flags; rig/audio defaults
+      from config; auto-tune drive + TX offset persisted; station shown in status.
 - [ ] Message parsing into structured fields (call_to / call_de / grid / report).
-- [ ] Auto-sequencing state machine (CQ → grid → report → R-report → RR73 → 73).
+- [ ] Split view: Band Activity (all) ǀ Rx Frequency (filtered to TX offset).
+- [ ] Settings panel (TUI): edit rig / serial / audio / call / prefs.
+- [ ] Auto-sequencing state machine (reply → report → R-report → RR73 → 73).
 - [ ] ADIF logging.
 
 ## Milestone 4 — Transmit

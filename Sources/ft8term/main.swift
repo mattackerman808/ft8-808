@@ -31,6 +31,7 @@ final class App {
     let outDevice: String?
     let spectrumCols: Int
 
+    private var config: StationConfig
     private var spectrum: [Float] = []
     private var avgSpectrum: [Float] = []          // rolling busy map for auto-pick
     private var passband: ClosedRange<Float> = 200...3000
@@ -57,7 +58,7 @@ final class App {
     }
 
     init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController,
-         outDevice: String?, txOffsetHz: Float = 1500) {
+         outDevice: String?, config: StationConfig) {
         let (rows, cols) = Terminal.size()
         _ = rows
         let columns = max(20, cols - 2)
@@ -67,7 +68,9 @@ final class App {
         self.rig = rig
         self.sourceLabel = label
         self.outDevice = outDevice
-        self.txOffsetHz = txOffsetHz
+        self.config = config
+        self.txOffsetHz = config.txOffsetHz
+        self.txLevelDb = config.txDriveDb
     }
 
     private let interactive = isatty(STDIN_FILENO) == 1
@@ -95,6 +98,10 @@ final class App {
         meterTask?.cancel(); meterTask = nil
         tx?.stop(); tx = nil
         if tuning { try? await rig.setPTT(false); tuning = false }
+        // Persist the current TX offset / drive for next launch.
+        config.txOffsetHz = txOffsetHz
+        config.txDriveDb = txLevelDb
+        saveConfig()
         consume.cancel()
     }
 
@@ -225,6 +232,8 @@ final class App {
         tx?.setFrequency(txOffsetHz)                            // follow live while tuning
         render()
     }
+
+    private func saveConfig() { try? ConfigStore.save(config) }
 
     /// Auto-pick a clear, usable, central ~50 Hz slice from the busy map.
     private func autoPickTxFrequency() {
@@ -382,10 +391,11 @@ final class App {
         lastMeters = await rig.meters()
         let finalPower = power(lastMeters)
 
-        // Calibration done — stop transmitting. The drive level (txLevelDb) is
-        // kept for the next tune / transmit.
+        // Calibration done — stop transmitting and persist the drive level.
         await stopTune()
-        notice = String(format: "auto-tune → %+.0f dBFS  ≈%.0f W  ALC %.2f  (TX off)",
+        config.txDriveDb = txLevelDb
+        saveConfig()
+        notice = String(format: "auto-tune → %+.0f dBFS  ≈%.0f W  ALC %.2f  (TX off, saved)",
                         knee, finalPower, resultAlc)
         render()
     }
@@ -403,9 +413,12 @@ final class App {
         let tx = (s.transmitting || tuning) ? "\(Terminal.fg256(196))TX\(Terminal.reset)"
                                             : "\(Terminal.fg256(46))RX\(Terminal.reset)"
         let rigLine = s.connected ? "\(mhz) MHz \(s.mode.rawValue)  \(tx)" : "no rig"
+        let station = config.isStationSet
+            ? "\(Terminal.fg256(45))\(config.callsign)\(Terminal.reset) \(Terminal.dim)\(config.grid)\(Terminal.reset)"
+            : "\(Terminal.fg256(208))set --call/--grid\(Terminal.reset)"
         out += Terminal.bold + Terminal.fg256(45) + " FT8-808 " + Terminal.reset
         out += Terminal.dim + " \(utc)  " + Terminal.reset
-        out += rigLine + "\r\n"
+        out += rigLine + "  \(station)\r\n"
 
         // FT8 15 s cycle progress bar.
         out += renderCycleBar(width: width) + "\r\n"
@@ -602,6 +615,10 @@ func usage() -> Never {
 
       <spec> = dummy | name-or-model[,device[,baud]]   (e.g. ftdx101d,/dev/cu...,38400)
       --out  output device for Tune (defaults to the --audio device)
+      --call <CALL>  --grid <GRID>   set your station (persisted)
+
+    Flags are saved to ~/.config/ft8-808/config.json, so once set you can just
+    run: ft8term --live
 
     In the live view:
       ←/→ or ,/.   move TX cursor (offset)      <  >   coarse
@@ -643,10 +660,21 @@ if args.contains("--list-audio") {
     exit(0)
 }
 
-let proto: FT8Protocol = args.contains("--ft4") ? .ft4 : .ft8
+// Load persisted config and fold in any CLI overrides (which then persist, so
+// you can configure once with flags and just `ft8term --live` afterwards).
+var config = ConfigStore.load()
+if let c = flagValue("--call")  { config.callsign = c.uppercased() }
+if let g = flagValue("--grid")  { config.grid = g.uppercased() }
+if let r = flagValue("--rig")   { config.rigSpec = r }
+if let a = flagValue("--audio") { config.audioInput = a }
+if let o = flagValue("--out")   { config.audioOutput = o }
+if args.contains("--ft4") { config.proto = "ft4" } else if args.contains("--ft8") { config.proto = "ft8" }
+try? ConfigStore.save(config)
+
+let proto: FT8Protocol = config.proto == "ft4" ? .ft4 : .ft8
 
 // Positional args = tokens that aren't flags or flag values.
-let valueFlags: Set<String> = ["--rig", "--audio", "--out", "--tune-freq"]
+let valueFlags: Set<String> = ["--rig", "--audio", "--out", "--call", "--grid"]
 var positionals: [String] = []
 do {
     var i = 1
@@ -661,10 +689,9 @@ do {
     }
 }
 
-let audioDevice = flagValue("--audio")
+let audioDevice = config.audioInput
 // Tune output: explicit --out, else the same codec we capture from (the rig).
-let outDevice = flagValue("--out") ?? audioDevice
-let tuneFreq = Float(flagValue("--tune-freq") ?? "") ?? 1500
+let outDevice = config.audioOutput ?? config.audioInput
 
 // Decide the audio source: --live (capture) or a WAV path.
 let live = args.contains("--live")
@@ -683,12 +710,10 @@ if live {
     sourceLabel = wavURL.lastPathComponent
 }
 
-func makeRig() async -> RigController {
-    guard let i = args.firstIndex(of: "--rig"), i + 1 < args.count else {
-        return MockRigController()
-    }
+func makeRig(spec: String?) async -> RigController {
+    guard let spec else { return MockRigController() }
     do {
-        let rig = try RigSpec.controller(args[i + 1])
+        let rig = try RigSpec.controller(spec)
         try await rig.open()
         return rig
     } catch {
@@ -700,9 +725,9 @@ func makeRig() async -> RigController {
 signal(SIGINT)  { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
 signal(SIGTERM) { _ in HamlibRigController.panicUnkey(); Terminal.restore(); exit(0) }
 
-let rig = await makeRig()
+let rig = await makeRig(spec: config.rigSpec)
 Terminal.enableRawMode()
 let app = App(source: source, label: sourceLabel, proto: proto, rig: rig,
-              outDevice: outDevice, txOffsetHz: tuneFreq)
+              outDevice: outDevice, config: config)
 await app.run()
 Terminal.restore()
