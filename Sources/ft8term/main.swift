@@ -421,13 +421,14 @@ final class App {
         func power(_ m: RigMeters?) -> Float { m?.powerWatts ?? ((m?.powerPercent ?? 0) * 100) }
 
         let startDb: Float = -45
-        let maxDb: Float = -10   // backstop; ALC onset / power plateau normally stop us first
-        let alcClean: Float = 0.05  // ALC at/below this = essentially no ALC action
+        let maxDb: Float = -6    // backstop; the power plateau normally stops us first
         var samples: [(db: Float, power: Float, alc: Float)] = []
         var maxPower: Float = 0
         var flat = 0
         var db = startDb
 
+        // Sweep up until OUTPUT POWER plateaus (the rig's real ceiling). Don't
+        // bail on ALC — a little ALC is normal; we want to see the true peak.
         while db <= maxDb {
             if !tuning || Task.isCancelled { break }
             setLevelDb(db)
@@ -446,28 +447,20 @@ final class App {
             } else {
                 flat += 1
             }
-            // Stop once ALC is clearly deflecting and power has stopped climbing,
-            // or power plateaus with meaningful output (guards the dead low end).
-            if alc > 0.15 && flat >= 1 { break }
+            // Plateaued (power stopped climbing) with meaningful output → at the
+            // ceiling. The maxPower>5 guard keeps the dead low end from tripping it.
             if flat >= 3 && maxPower > 5 { break }
             db += 1
         }
 
-        // Prefer the CLEAN knee: the highest drive that keeps ALC near zero (best
-        // for FT8). Fall back to the lowest drive reaching ~97% of peak if ALC
-        // never deflected.
-        let knee: Float
-        let resultAlc: Float
-        if let clean = samples.filter({ $0.alc <= alcClean && $0.power > maxPower * 0.5 })
-                              .max(by: { $0.db < $1.db }) {
-            knee = clean.db
-            resultAlc = clean.alc
-        } else {
-            let target = maxPower * 0.97
-            let pick = samples.first(where: { $0.power >= target }) ?? samples.max(by: { $0.power < $1.power })
-            knee = pick?.db ?? txLevelDb
-            resultAlc = pick?.alc ?? 0
-        }
+        // Target the POWER knee: the LOWEST drive that reaches ~97% of the peak.
+        // That makes rated power with the least audio (so the least ALC for that
+        // power) — far better than chasing zero ALC and giving up 30 W.
+        let target = maxPower * 0.97
+        let pick = samples.first(where: { $0.power >= target })
+            ?? samples.max(by: { $0.power < $1.power })
+        let knee = pick?.db ?? txLevelDb
+        let resultAlc = pick?.alc ?? 0
 
         setLevelDb(knee)
         try? await Task.sleep(nanoseconds: 300_000_000)
