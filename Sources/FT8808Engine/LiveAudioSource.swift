@@ -29,7 +29,7 @@ public final class LiveAudioSource: AudioSource, @unchecked Sendable {
     private let slotSeconds: Double
     private let deviceQuery: String?
 
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()   // rebuilt on resume (see resume())
     private let lock = NSLock()
     private var converter: AVAudioConverter?
     private var accumulator: SlotAccumulator
@@ -112,10 +112,16 @@ public final class LiveAudioSource: AudioSource, @unchecked Sendable {
         if engine.isRunning { engine.stop() }
     }
 
-    /// Resume capturing after `suspend()`. The slot accumulator continues; a
-    /// straddling partial slot is dropped automatically.
+    /// Resume capturing after `suspend()`. Rebuilds the engine from scratch — the
+    /// TX engine reconfigured the shared codec, leaving the old engine in a state
+    /// that asserts (an AVFoundation trap that `try?` can't catch). The slot
+    /// accumulator continues; a straddling partial slot is dropped automatically.
     public func resume() {
         guard yieldSlot != nil, !engine.isRunning else { return }
+        engine = AVAudioEngine()
+        if let q = deviceQuery, let dev = AudioDevices.find(q) {
+            try? setInputDevice(dev.id)
+        }
         try? configureAndStart()
     }
 
