@@ -917,6 +917,25 @@ if args.contains("--list-rigs") {
     exit(0)
 }
 
+// --tone [device]: play a 1.5 kHz test tone for 5 s — isolates the audio output
+// path from rig/PTT/tune. No CAT, no keying.
+if let i = args.firstIndex(of: "--tone") {
+    let device: String? = (i + 1 < args.count && !args[i + 1].hasPrefix("--")) ? args[i + 1] : nil
+    print("Playing 1500 Hz tone → \(device ?? "default output") for 5 s…")
+    let tone = TxAudioOutput(frequencyHz: 1500, device: device)
+    tone.amplitude = 0.2   // ~-14 dBFS, clearly audible on a speaker
+    do {
+        try tone.start()
+    } catch {
+        print("error: \(error)")
+        exit(1)
+    }
+    try? await Task.sleep(nanoseconds: 5_000_000_000)
+    tone.stop()
+    print("done.")
+    exit(0)
+}
+
 // --list-serial: print serial ports with USB identity, flag the likely CAT port.
 if args.contains("--list-serial") {
     let ports = SerialPorts.list()
