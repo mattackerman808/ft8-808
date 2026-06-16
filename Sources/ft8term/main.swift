@@ -26,6 +26,7 @@ struct ActivityLine {
 final class App {
     let engine: DecodeEngine
     let source: any AudioSource
+    let liveSource: LiveAudioSource?   // non-nil in live mode; suspended during TX
     let rig: RigController
     let sourceLabel: String
     let outDevice: String?
@@ -70,6 +71,7 @@ final class App {
         self.engine = DecodeEngine(proto: proto, spectrumColumns: columns)
         self.spectrumCols = columns
         self.source = source
+        self.liveSource = source as? LiveAudioSource
         self.rig = rig
         self.sourceLabel = label
         self.outDevice = outDevice
@@ -347,6 +349,9 @@ final class App {
         tuneBusy = true
         defer { tuneBusy = false }
 
+        // Release the rig's USB codec from capture before the TX engine grabs it.
+        liveSource?.suspend()
+
         let out = TxAudioOutput(frequencyHz: txOffsetHz, device: outDevice)
         out.amplitude = Self.amplitude(fromDb: txLevelDb)
         do {
@@ -355,6 +360,7 @@ final class App {
         } catch {
             out.stop()
             try? await rig.setPTT(false)
+            liveSource?.resume()        // restore capture if tune couldn't start
             notice = "tune failed: \(error)"
             render()
             return
@@ -377,6 +383,7 @@ final class App {
         tx?.stop()
         tx = nil
         try? await rig.setPTT(false)
+        liveSource?.resume()            // bring receive audio back
         tuning = false
         rigState.transmitting = false
         render()

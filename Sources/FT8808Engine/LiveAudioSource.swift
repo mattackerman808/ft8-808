@@ -60,6 +60,8 @@ public final class LiveAudioSource: AudioSource, @unchecked Sendable {
     /// Set after `slots()` finishes early so callers can report why.
     public private(set) var lastError: Error?
 
+    private var yieldSlot: (@Sendable (AudioSlot) -> Void)?
+
     private func start(yield: @escaping @Sendable (AudioSlot) -> Void) async throws {
         try await requestMicPermission()
 
@@ -67,7 +69,13 @@ public final class LiveAudioSource: AudioSource, @unchecked Sendable {
             guard let dev = AudioDevices.find(q) else { throw LiveError.deviceNotFound(q) }
             try setInputDevice(dev.id)
         }
+        yieldSlot = yield
+        try configureAndStart()
+    }
 
+    /// (Re)read the device format, build the converter, install the tap, and run.
+    /// Reusable so capture can be resumed after a transmit suspend.
+    private func configureAndStart() throws {
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
         guard hwFormat.sampleRate > 0 else {
@@ -82,7 +90,9 @@ public final class LiveAudioSource: AudioSource, @unchecked Sendable {
         outputFormat = outFormat
         converter = conv
 
+        let yield = yieldSlot
         input.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+            guard let yield else { return }
             self?.process(buffer, yield: yield)
         }
 
@@ -95,9 +105,24 @@ public final class LiveAudioSource: AudioSource, @unchecked Sendable {
         }
     }
 
+    /// Stop capturing and release the input device — call before transmitting so
+    /// the TX output engine and capture don't fight over the rig's USB codec.
+    public func suspend() {
+        engine.inputNode.removeTap(onBus: 0)
+        if engine.isRunning { engine.stop() }
+    }
+
+    /// Resume capturing after `suspend()`. The slot accumulator continues; a
+    /// straddling partial slot is dropped automatically.
+    public func resume() {
+        guard yieldSlot != nil, !engine.isRunning else { return }
+        try? configureAndStart()
+    }
+
     private func stop() {
         engine.inputNode.removeTap(onBus: 0)
         if engine.isRunning { engine.stop() }
+        yieldSlot = nil
     }
 
     private func process(_ inBuffer: AVAudioPCMBuffer, yield: @Sendable (AudioSlot) -> Void) {
