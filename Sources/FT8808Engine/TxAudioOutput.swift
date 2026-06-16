@@ -50,28 +50,19 @@ public final class TxAudioOutput: @unchecked Sendable {
                 throw OutputError.deviceNotFound(q)
             }
             try setOutputDevice(dev.id)
-            // Push the codec's output volume to max so a low macOS device volume
-            // can't silently attenuate the TX audio (our drive level is the only
-            // software gain stage; the rig's USB input gain is the other).
-            AudioDevices.setOutputVolumeMax(dev.id)
         }
 
-        // Stereo so the tone lands on BOTH channels — rigs differ in which USB
-        // audio channel they read for TX, and a mono upmix can miss it.
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
+        // Mono, like WSJT-X (and like the config that drove the Yaesu).
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
             throw OutputError.formatUnavailable
         }
 
         let gen = generator
         let src = AVAudioSourceNode(format: format) { _, _, frameCount, ablPtr -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(ablPtr)
-            guard let first = abl.first?.mData else { return noErr }
-            let n = Int(frameCount)
-            // Render the tone into channel 0, then copy to the rest (L = R).
-            gen.render(UnsafeMutableBufferPointer(start: first.assumingMemoryBound(to: Float.self), count: n))
-            for i in 1..<abl.count {
-                if let d = abl[i].mData { memcpy(d, first, n * MemoryLayout<Float>.size) }
-            }
+            guard let mData = abl.first?.mData else { return noErr }
+            let ptr = mData.assumingMemoryBound(to: Float.self)
+            gen.render(UnsafeMutableBufferPointer(start: ptr, count: Int(frameCount)))
             return noErr
         }
         sourceNode = src
