@@ -779,19 +779,34 @@ func flagValue(_ name: String) -> String? {
     return args[i + 1]
 }
 
-// --list-audio: print input devices and exit (no terminal takeover).
+// --list-audio: print all audio devices with detail and flag the likely rig.
 if args.contains("--list-audio") {
-    let devices = AudioDevices.inputDevices()
-    let defID = AudioDevices.defaultInputDeviceID()
+    let devices = AudioDevices.allDevices()
+        .sorted { ($0.likelyRig ? 0 : 1, $0.name) < ($1.likelyRig ? 0 : 1, $1.name) }
     if devices.isEmpty {
-        print("No audio input devices found.")
-    } else {
-        print("Audio input devices:")
-        for d in devices {
-            let star = (d.id == defID) ? " (default)" : ""
-            print("  \(d.name)  [\(d.channels) ch]\(star)\n    uid: \(d.uid)")
+        print("No audio devices found.")
+        exit(0)
+    }
+    func pad(_ s: String, _ n: Int) -> String { s.count >= n ? s : s + String(repeating: " ", count: n - s.count) }
+    print("Audio devices:\n")
+    for d in devices {
+        let io = "\(d.inputChannels) in / \(d.outputChannels) out"
+        var flag = ""
+        if d.likelyRig {
+            let dir = d.inputChannels > 0 ? "RX/capture" : "TX/output"
+            flag = "   ← likely rig (\(dir))"
         }
-        print("\nUse: ft8term --audio \"<name substring or uid>\"")
+        print("  \(pad(d.name, 26)) \(pad(d.transport, 10)) \(pad(io, 14)) \(d.manufacturer)\(flag)")
+        print("  \(pad("", 26)) \(pad("uid:", 10)) \(d.uid)\n")
+    }
+    if let rig = devices.first(where: { $0.likelyRig }) {
+        let name = rig.name.trimmingCharacters(in: .whitespaces)
+        print("Your rig's codec looks like: \(rig.name)  (\(rig.manufacturer))")
+        print("Many rigs show it twice — an RX (input) half and a TX (output) half,")
+        print("same name. FT8-808 picks the right half per direction automatically, so:")
+        print("\n  ft8term --audio \"\(name)\"\n")
+    } else {
+        print("Use:  ft8term --audio \"<name substring or uid>\"")
     }
     exit(0)
 }

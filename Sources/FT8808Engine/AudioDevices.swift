@@ -7,6 +7,28 @@ public struct AudioInputDevice: Sendable, Identifiable {
     public let name: String
     public let uid: String
     public let channels: Int
+    public let manufacturer: String
+    public let transport: String   // "USB", "Built-in", "Bluetooth", …
+}
+
+/// Full picture of a device (both directions) for the device picker / list.
+public struct AudioDeviceInfo: Sendable, Identifiable {
+    public let id: AudioDeviceID
+    public let name: String
+    public let uid: String
+    public let manufacturer: String
+    public let transport: String
+    public let inputChannels: Int
+    public let outputChannels: Int
+
+    /// Heuristic: a USB device that isn't Apple's — very likely a transceiver's
+    /// audio codec (Yaesu/Icom/Kenwood use TI/BurrBrown chips). Note many rigs
+    /// expose the codec as TWO devices with the same name — an input-only (RX)
+    /// half and an output-only (TX) half — so this can match both.
+    public var likelyRig: Bool {
+        transport == "USB" && !manufacturer.lowercased().contains("apple")
+            && (inputChannels > 0 || outputChannels > 0)
+    }
 }
 
 /// Enumeration + lookup of CoreAudio devices, so the user can pick the rig's
@@ -29,7 +51,26 @@ public enum AudioDevices {
                 id: id,
                 name: stringProperty(id, kAudioObjectPropertyName) ?? "Device \(id)",
                 uid: stringProperty(id, kAudioDevicePropertyDeviceUID) ?? "",
-                channels: ch)
+                channels: ch,
+                manufacturer: stringProperty(id, kAudioObjectPropertyManufacturer) ?? "",
+                transport: transportName(id))
+        }
+    }
+
+    /// Every device with audio in either direction, with full detail for listing.
+    public static func allDevices() -> [AudioDeviceInfo] {
+        deviceIDs().compactMap { id in
+            let inCh = channelCount(id, scope: .input)
+            let outCh = channelCount(id, scope: .output)
+            guard inCh > 0 || outCh > 0 else { return nil }
+            return AudioDeviceInfo(
+                id: id,
+                name: stringProperty(id, kAudioObjectPropertyName) ?? "Device \(id)",
+                uid: stringProperty(id, kAudioDevicePropertyDeviceUID) ?? "",
+                manufacturer: stringProperty(id, kAudioObjectPropertyManufacturer) ?? "",
+                transport: transportName(id),
+                inputChannels: inCh,
+                outputChannels: outCh)
         }
     }
 
@@ -75,6 +116,30 @@ public enum AudioDevices {
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr
         else { return [] }
         return ids
+    }
+
+    private static func transportName(_ id: AudioDeviceID) -> String {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var t: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &t) == noErr else { return "?" }
+        switch t {
+        case kAudioDeviceTransportTypeUSB:         return "USB"
+        case kAudioDeviceTransportTypeBuiltIn:     return "Built-in"
+        case kAudioDeviceTransportTypeBluetooth,
+             kAudioDeviceTransportTypeBluetoothLE: return "Bluetooth"
+        case kAudioDeviceTransportTypeAggregate:   return "Aggregate"
+        case kAudioDeviceTransportTypeVirtual:     return "Virtual"
+        case kAudioDeviceTransportTypeDisplayPort: return "DisplayPort"
+        case kAudioDeviceTransportTypeHDMI:        return "HDMI"
+        case kAudioDeviceTransportTypeThunderbolt: return "Thunderbolt"
+        case kAudioDeviceTransportTypeAirPlay:     return "AirPlay"
+        case kAudioDeviceTransportTypePCI:         return "PCI"
+        default:                                   return "?"
+        }
     }
 
     private static func channelCount(_ id: AudioDeviceID, scope: Scope) -> Int {
