@@ -96,10 +96,19 @@ public enum Spectrum {
             bars[c] = peak
         }
 
-        // Normalise to [0,1] using a rolling noise floor / peak.
-        let lo = bars.min() ?? 0
-        let hi = bars.max() ?? 1
-        let span = max(1e-3, hi - lo)
-        return bars.map { max(0, min(1, ($0 - lo) / span)) }
+        // Map to [0,1] against an estimated noise floor over a FIXED dB span —
+        // the way a real waterfall reads. The noise floor sits dark and only
+        // energy rising above it lights up (green→yellow→red). This replaces a
+        // per-slot min→max stretch, which rescaled every slot to its own peak
+        // and so painted a busy band (or the rig's passband floor) all-red.
+        //
+        // Floor = a low percentile of the bars, NOT the absolute min: the band's
+        // out-of-passband rolloff and inter-signal gaps would drag a plain min
+        // far below the true floor. A percentile ignores both the rolloff and
+        // the many signal peaks on a crowded band.
+        let sorted = bars.sorted()
+        let floorDB = sorted[sorted.count / 4]          // 25th percentile ≈ noise floor
+        let spanDB: Float = 30                           // dB above floor → full scale
+        return bars.map { max(0, min(1, ($0 - floorDB) / spanDB)) }
     }
 }

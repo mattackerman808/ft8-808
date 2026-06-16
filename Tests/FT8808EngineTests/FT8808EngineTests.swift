@@ -25,6 +25,9 @@ final class FT8808EngineTests: XCTestCase {
         XCTAssertEqual(bars.count, 64)
         XCTAssertTrue(bars.allSatisfy { $0 >= 0 && $0 <= 1 })
         XCTAssertGreaterThan(bars.max() ?? 0, 0.5) // a real signal has peaks
+        // Floor-referenced scaling (not per-slot min→max): the noise floor and
+        // out-of-passband bins must read dark, never stretched up to full scale.
+        XCTAssertTrue(bars.contains { $0 < 0.2 }, "noise floor should map near 0, not saturate")
     }
 
     func testEngineDecodesSlots() async throws {
