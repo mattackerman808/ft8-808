@@ -257,14 +257,11 @@ final class App {
     }
 
     private func openSettingsNow() {
-        let serials = ((try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? [])
-            .filter { $0.hasPrefix("cu.") && ($0.contains("usb") || $0.contains("serial")) }
-            .map { "/dev/\($0)" }.sorted()
         settings = SettingsEditor(
             config: config,
-            serialPorts: serials,
-            inputDevices: AudioDevices.inputDevices().map(\.name),
-            outputDevices: AudioDevices.outputDevices().map(\.name))
+            serialPorts: SerialPorts.list(),
+            inputDevices: AudioDevices.inputDevices(),
+            outputDevices: AudioDevices.outputDevices())
         mode = .settings
         render()
     }
@@ -652,7 +649,15 @@ final class App {
             out += "  \(marker) \(Terminal.dim)\(label)\(Terminal.reset)  \(value)\r\n"
         }
 
-        out += "\r\n" + rule(min(Terminal.size().cols, 60)) + "\r\n"
+        // Detail line for the selected field (USB chip, transport, "likely rig"…).
+        out += "\r\n"
+        if let d = ed.detail() {
+            out += "  \(Terminal.fg256(45))↳ \(d)\(Terminal.reset)\r\n"
+        } else {
+            out += "\r\n"
+        }
+
+        out += rule(min(Terminal.size().cols, 60)) + "\r\n"
         if ed.editing {
             out += " \(Terminal.dim)typing… \(Terminal.bold)[Enter]\(Terminal.reset)\(Terminal.dim) done\(Terminal.reset)"
         } else {
@@ -745,7 +750,8 @@ func usage() -> Never {
     usage:
       ft8term                       live receive (default)
       ft8term <file.wav>            decode a recording instead
-      ft8term --list-audio          list input devices
+      ft8term --list-audio          list audio devices (flags the rig codec)
+      ft8term --list-serial         list serial ports (flags the rig CAT port)
 
       options (saved to ~/.config/ft8-808/config.json):
         --call <CALL>  --grid <GRID>     your station
@@ -807,6 +813,24 @@ if args.contains("--list-audio") {
         print("\n  ft8term --audio \"\(name)\"\n")
     } else {
         print("Use:  ft8term --audio \"<name substring or uid>\"")
+    }
+    exit(0)
+}
+
+// --list-serial: print serial ports with USB identity, flag the likely CAT port.
+if args.contains("--list-serial") {
+    let ports = SerialPorts.list()
+    if ports.isEmpty {
+        print("No serial ports found.")
+    } else {
+        print("Serial ports:\n")
+        for p in ports {
+            let flag = p.likelyRig ? "   ← " : "      "
+            print("  \(p.path)\n  \(flag)\(p.detail)\n")
+        }
+        if let rig = ports.first(where: { $0.likelyRig }) {
+            print("Likely rig CAT port: \(rig.path)")
+        }
     }
     exit(0)
 }

@@ -3,7 +3,8 @@ import FT8808Engine
 import HamlibRig
 
 /// Editable model for the in-app Settings panel. Decomposes `StationConfig`
-/// (notably the `rigSpec` string) into individual fields and recomposes on save.
+/// (notably the `rigSpec` string) into fields, carries the detected serial/audio
+/// devices so it can describe and auto-detect the rig, and recomposes on save.
 @MainActor
 final class SettingsEditor {
     enum Kind {
@@ -21,36 +22,53 @@ final class SettingsEditor {
     var editing = false
     var buffer = ""
 
-    init(config: StationConfig, serialPorts: [String], inputDevices: [String], outputDevices: [String]) {
+    private let serialPorts: [SerialPort]
+    private let inputDevices: [AudioInputDevice]
+    private let outputDevices: [AudioInputDevice]
+
+    init(config: StationConfig, serialPorts: [SerialPort],
+         inputDevices: [AudioInputDevice], outputDevices: [AudioInputDevice]) {
+        self.serialPorts = serialPorts
+        self.inputDevices = inputDevices
+        self.outputDevices = outputDevices
+
         fields = [
             Field(label: "Call",      kind: .text),
             Field(label: "Grid",      kind: .text),
             Field(label: "Rig",       kind: .choice(["none"] + RigSpec.aliases.keys.sorted())),
-            Field(label: "Serial",    kind: .choice(["none"] + serialPorts)),
+            Field(label: "Serial",    kind: .choice(["none"] + serialPorts.map(\.path))),
             Field(label: "Baud",      kind: .choice(["4800", "9600", "19200", "38400", "57600", "115200"])),
-            Field(label: "Audio in",  kind: .choice(["default"] + inputDevices)),
-            Field(label: "Audio out", kind: .choice(["default"] + outputDevices)),
+            Field(label: "Audio in",  kind: .choice(["default"] + inputDevices.map(\.name))),
+            Field(label: "Audio out", kind: .choice(["default"] + outputDevices.map(\.name))),
             Field(label: "Proto",     kind: .choice(["ft8", "ft4"])),
         ]
+
         let (rig, serial, baud) = Self.splitRig(config.rigSpec)
+
+        // Auto-detect: pre-fill empty device/port fields with the likely rig.
+        let rigSerial = serialPorts.first(where: { $0.likelyRig })?.path
+        let rigInput = inputDevices.first(where: { Self.isRig($0) })?.name
+        let rigOutput = outputDevices.first(where: { Self.isRig($0) })?.name
+
         values = [
             config.callsign,
             config.grid,
             rig.isEmpty ? "none" : rig,
-            serial.isEmpty ? "none" : serial,
+            serial.isEmpty ? (rigSerial ?? "none") : serial,
             baud.isEmpty ? "38400" : baud,
-            config.audioInput ?? "default",
-            config.audioOutput ?? "default",
+            config.audioInput ?? (rigInput ?? "default"),
+            config.audioOutput ?? (rigOutput ?? "default"),
             config.proto,
         ]
     }
+
+    // MARK: navigation / editing
 
     func moveSelection(_ delta: Int) {
         guard !editing else { return }
         selected = max(0, min(fields.count - 1, selected + delta))
     }
 
-    /// Cycle a choice field's value (±1).
     func cycle(_ dir: Int) {
         guard !editing, case let .choice(options) = fields[selected].kind, !options.isEmpty else { return }
         let cur = options.firstIndex(of: values[selected]) ?? 0
@@ -58,7 +76,6 @@ final class SettingsEditor {
         values[selected] = options[next]
     }
 
-    /// Enter: begin editing a text field, or cycle a choice field forward.
     func activate() {
         switch fields[selected].kind {
         case .text:
@@ -78,7 +95,42 @@ final class SettingsEditor {
     func typeCharacter(_ c: Character) { buffer.append(c) }
     func backspace() { if !buffer.isEmpty { buffer.removeLast() } }
 
-    /// Fold the edited values back into a `StationConfig`.
+    // MARK: detail line for the selected field
+
+    /// A human description of the current value (USB chip, transport, "likely rig"…).
+    func detail() -> String? {
+        let value = values[selected]
+        switch fields[selected].label {
+        case "Serial":
+            if value == "none" { return "no CAT control" }
+            return serialPorts.first(where: { $0.path == value })?.detail
+        case "Audio in":
+            return audioDetail(value, in: inputDevices)
+        case "Audio out":
+            return audioDetail(value, in: outputDevices)
+        case "Rig":
+            if value == "none" { return "no rig control" }
+            return RigSpec.aliases[value].map { "Hamlib model \($0)" }
+        default:
+            return nil
+        }
+    }
+
+    private func audioDetail(_ value: String, in devices: [AudioInputDevice]) -> String? {
+        if value == "default" { return "system default device" }
+        guard let d = devices.first(where: { $0.name == value }) else { return nil }
+        var bits = [d.transport, "\(d.channels) ch"]
+        if !d.manufacturer.isEmpty { bits.append(d.manufacturer) }
+        if Self.isRig(d) { bits.append("likely rig") }
+        return bits.joined(separator: " · ")
+    }
+
+    private static func isRig(_ d: AudioInputDevice) -> Bool {
+        d.transport == "USB" && !d.manufacturer.lowercased().contains("apple")
+    }
+
+    // MARK: save
+
     func apply(to config: inout StationConfig) {
         if editing { commitEdit() }
         config.callsign = values[0].uppercased()
@@ -100,7 +152,6 @@ final class SettingsEditor {
         config.proto = values[7]
     }
 
-    /// Split "model,device,baud" into its parts.
     static func splitRig(_ spec: String?) -> (rig: String, serial: String, baud: String) {
         guard let spec, !spec.isEmpty else { return ("", "", "") }
         let p = spec.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
