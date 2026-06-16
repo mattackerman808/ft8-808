@@ -96,19 +96,24 @@ public enum Spectrum {
             bars[c] = peak
         }
 
-        // Map to [0,1] against an estimated noise floor over a FIXED dB span —
-        // the way a real waterfall reads. The noise floor sits dark and only
-        // energy rising above it lights up (green→yellow→red). This replaces a
-        // per-slot min→max stretch, which rescaled every slot to its own peak
-        // and so painted a busy band (or the rig's passband floor) all-red.
+        // Map to [0,1] so the noise floor reads dark and real signals light up
+        // (green→yellow→red), the way a waterfall should. We use PERCENTILES of
+        // the bars rather than min/max: a plain min→max stretch let the rig's
+        // out-of-passband rolloff drag the bottom far down, which bunched the
+        // in-band noise near the top and painted everything red.
         //
-        // Floor = a low percentile of the bars, NOT the absolute min: the band's
-        // out-of-passband rolloff and inter-signal gaps would drag a plain min
-        // far below the true floor. A percentile ignores both the rolloff and
-        // the many signal peaks on a crowded band.
+        //   floor = low percentile  → robust noise-floor estimate (maps to dark)
+        //   peak  = high percentile → strong signals (map to the hot end)
+        //
+        // The top is adaptive so contrast fits the band automatically instead of
+        // a fixed dB span (which left weak-but-present signals stuck in the
+        // blue). `minSpanDB` keeps a dead-quiet band's bare noise from being
+        // amplified into colour.
         let sorted = bars.sorted()
-        let floorDB = sorted[sorted.count / 4]          // 25th percentile ≈ noise floor
-        let spanDB: Float = 30                           // dB above floor → full scale
-        return bars.map { max(0, min(1, ($0 - floorDB) / spanDB)) }
+        let floorDB = sorted[sorted.count / 4]                       // 25th percentile
+        let peakDB  = sorted[min(sorted.count - 1, sorted.count * 9 / 10)] // 90th percentile
+        let minSpanDB: Float = 12
+        let span = max(minSpanDB, peakDB - floorDB)
+        return bars.map { max(0, min(1, ($0 - floorDB) / span)) }
     }
 }
