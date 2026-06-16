@@ -121,12 +121,15 @@ public actor HamlibRigController: RigController {
         guard let handle else { return nil }
         var m = ft8808_meters()
         guard ft8808_rig_get_meters(handle.ptr, &m) == 0 else { return nil }
+        // Some rigs/backends return NaN or junk for unsupported meters; drop
+        // non-finite values so callers never see them.
+        func finite(_ has: Int32, _ v: Float) -> Float? { (has != 0 && v.isFinite) ? v : nil }
         return RigMeters(
-            powerWatts: m.has_power_watts != 0 ? m.power_watts : nil,
-            powerPercent: m.has_power_pct != 0 ? m.power_pct : nil,
-            alc: m.has_alc != 0 ? m.alc : nil,
-            swr: m.has_swr != 0 ? m.swr : nil,
-            powerSetPercent: m.has_rfpower_set != 0 ? m.rfpower_set : nil)
+            powerWatts: finite(m.has_power_watts, m.power_watts),
+            powerPercent: finite(m.has_power_pct, m.power_pct),
+            alc: finite(m.has_alc, m.alc),
+            swr: finite(m.has_swr, m.swr),
+            powerSetPercent: finite(m.has_rfpower_set, m.rfpower_set))
     }
 
     /// The rig's RF power ceiling setting (0…1 of max).

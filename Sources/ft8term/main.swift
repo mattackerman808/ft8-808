@@ -760,18 +760,24 @@ final class App {
             + Terminal.reset + Terminal.fg256(45) + "]" + Terminal.reset
     }
 
+    /// Safe Float→Int: never traps on NaN/inf/out-of-range (clamps).
+    private func safeInt(_ v: Float, _ limit: Float = 99_999) -> Int {
+        guard v.isFinite else { return 0 }
+        return Int(Swift.max(-limit, Swift.min(limit, v)).rounded())
+    }
+
     /// Live rig TX meters; ALC turns red once it deflects (the overdrive cue).
     private func meterText() -> String {
         guard let m = lastMeters else { return "\(Terminal.dim)meters n/a\(Terminal.reset)" }
         var parts: [String] = []
-        if let w = m.powerWatts { parts.append("PWR \(Int(w.rounded()))W") }
-        else if let p = m.powerPercent { parts.append("PWR \(Int((p * 100).rounded()))%") }
-        if let set = m.powerSetPercent { parts.append("\(Terminal.dim)SET \(Int((set * 100).rounded()))%\(Terminal.reset)") }
-        if let a = m.alc {
+        if let w = m.powerWatts { parts.append("PWR \(safeInt(w))W") }
+        else if let p = m.powerPercent { parts.append("PWR \(safeInt(p * 100))%") }
+        if let set = m.powerSetPercent { parts.append("\(Terminal.dim)SET \(safeInt(set * 100))%\(Terminal.reset)") }
+        if let a = m.alc, a.isFinite {
             let col = a > 0.05 ? Terminal.fg256(196) : Terminal.fg256(46)
             parts.append("\(col)ALC \(String(format: "%.2f", a))\(Terminal.reset)")
         }
-        if let s = m.swr { parts.append("SWR \(String(format: "%.1f", s))") }
+        if let s = m.swr, s.isFinite { parts.append("SWR \(String(format: "%.1f", s))") }
         return parts.isEmpty ? "\(Terminal.dim)no meters\(Terminal.reset)" : parts.joined(separator: "  ")
     }
 
