@@ -115,12 +115,22 @@ int ft8808_rig_set_freq(ft8808_rig* r, double hz) {
 
 int ft8808_rig_set_mode(ft8808_rig* r, ft8808_mode mode) {
     if (r == NULL || r->rig == NULL) return -RIG_EINVAL;
-    return rig_set_mode(r->rig, RIG_VFO_CURR, mode_to_hamlib(mode), RIG_PASSBAND_NORMAL);
+    // RIG_PASSBAND_NOCHANGE: set the mode without stomping the user's filter
+    // width. On Kenwood (and others) RIG_PASSBAND_NORMAL forces the backend's
+    // canned passband for that mode — e.g. switching modes would clamp an SSB
+    // FT8 passband down to the data-mode roofing filter. Leave the filter alone.
+    return rig_set_mode(r->rig, RIG_VFO_CURR, mode_to_hamlib(mode), RIG_PASSBAND_NOCHANGE);
 }
 
 int ft8808_rig_set_ptt(ft8808_rig* r, int on) {
     if (r == NULL || r->rig == NULL) return -RIG_EINVAL;
-    return rig_set_ptt(r->rig, RIG_VFO_CURR, on ? RIG_PTT_ON : RIG_PTT_OFF);
+    // Key with the DATA PTT (RIG_PTT_ON_DATA) so rigs whose Hamlib ptt_type
+    // defaults to RIG_PTT_RIG_MICDATA (e.g. Kenwood TS-590SG → CAT "TX1;")
+    // route the rear/USB-codec audio to the modulator instead of the front
+    // mic. On rigs with the plain RIG_PTT_RIG type (e.g. Yaesu FTDX-101D) the
+    // frontend collapses RIG_PTT_ON_DATA back to RIG_PTT_ON, so this is a no-op
+    // there. This mirrors WSJT-X's "PTT Method: CAT / Audio Source: Rear/Data".
+    return rig_set_ptt(r->rig, RIG_VFO_CURR, on ? RIG_PTT_ON_DATA : RIG_PTT_OFF);
 }
 
 int ft8808_rig_get_meters(ft8808_rig* r, ft8808_meters* out) {
