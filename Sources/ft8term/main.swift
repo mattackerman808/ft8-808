@@ -144,6 +144,9 @@ final class App {
 
     private func markFinished() {
         finished = true
+        // Surface a live-capture failure (e.g. permission/device) instead of
+        // silently showing no audio.
+        if let err = liveSource?.lastError { notice = "audio: \(err)" }
         render()
         // In non-interactive/batch mode there is no key to wait for: exit once
         // the source is exhausted.
