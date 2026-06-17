@@ -7,6 +7,19 @@ audio, rig, QSO, logging). Front-ends are thin clients over it — the terminal
 client `ft8term` first (SSH-friendly, no graphics yak-shaving), the native
 macOS app later. See [architecture.md](architecture.md).
 
+## Status (Milestones 0–4 essentially done)
+
+FT8-808 makes **complete, automated QSOs on the air** and logs them to ADIF.
+Receive → decode (real SNR) → dual-column band view → pick a station (or call
+CQ) → the QSO state machine sequences the whole exchange → auto-complete + ADIF.
+Live PWR/ALC/SWR during TX; per-callsign highlighting (my-call green,
+worked-before red); even/odd slot markers. The big course-corrections that got
+here are written up in [`../CLAUDE.md`](../CLAUDE.md): **raw CoreAudio AUHAL for
+both capture and playback** (AVAudioEngine mis-binds the rig codec), the Kenwood
+**DATA-PTT** and **don't-read-RFPOWER** fixes, and keeping RX live through TX.
+Next: native macOS app (M5), plus polish (rig-aware ALC threshold, macros,
+new-DXCC highlighting). The checklists below are kept for history.
+
 ## Milestone 0 — Spike the codec (de-risk decode) ✅
 - [x] Vendor `ft8_lib`, build it as a SwiftPM C target (`CFT8`).
 - [x] Swift `FT8Codec` wrapper: `decode(samples:)` and `decode(wavPath:)`.
