@@ -40,6 +40,7 @@ struct ActivityLine {
     var mine: Bool = false            // involves my call (QSO column) or my own TX
     var toMe: Bool = false            // my call appears in the message (highlight green)
     var deCall: String? = nil         // sender callsign (for worked-before check)
+    var txBody: String? = nil         // plain text of a transmitted message (TX echo)
 }
 
 @MainActor
@@ -772,7 +773,7 @@ final class App {
         }
         sending = true
         rigState.transmitting = true
-        activity.append(ActivityLine(text: " \(Terminal.fg256(196))Tx\(Terminal.reset)        \(text)", cq: false, mine: true))
+        activity.append(ActivityLine(text: "", cq: false, mine: true, txBody: text))
         startMeterPoll()                 // live PWR / ALC / SWR off the rig over CAT
         render()
 
@@ -1047,25 +1048,38 @@ final class App {
                          : body + Terminal.reset
     }
 
+    /// Colour only the callsign tokens in `s` — my call green, worked-before red
+    /// — leaving everything else in `base`. Per-token, so both calls on the same
+    /// line are coloured independently.
+    private func colorizeCalls(_ s: String, base: String) -> String {
+        let myCall = config.callsign.uppercased()
+        let restore = base.isEmpty ? Terminal.reset : base
+        let body = s.split(separator: " ", omittingEmptySubsequences: false).map { tok -> String in
+            let up = tok.uppercased()
+            if !myCall.isEmpty, up == myCall { return "\(Terminal.fg256(46))\(tok)\(restore)" }
+            if !up.isEmpty, workedCalls.contains(up) { return "\(Terminal.fg256(196))\(tok)\(restore)" }
+            return String(tok)
+        }.joined(separator: " ")
+        return base + body + (base.isEmpty ? "" : Terminal.reset)
+    }
+
     private func format(_ line: ActivityLine, selected: Bool = false) -> String {
-        // Colour priority: my call (green) > worked-before (red) > CQ (yellow) > normal.
-        let color: String
-        if line.toMe { color = Terminal.fg256(46) }
-        else if let dc = line.deCall, workedCalls.contains(dc) { color = Terminal.fg256(196) }
-        else if line.cq { color = Terminal.fg256(220) }
-        else { color = Terminal.fg256(252) }
-        if selected {
-            return "\(Terminal.bold)\(Terminal.fg256(45))▸\(Terminal.reset)\(color)\(line.text.dropFirst())\(Terminal.reset)"
+        // Transmitted message echo: red "Tx" tag + the message, calls highlighted.
+        if let body = line.txBody {
+            return " \(Terminal.fg256(196))Tx\(Terminal.reset)        " + colorizeCalls(body, base: "")
         }
-        // Decodes get a left-edge slot-parity marker (even=blue, odd=orange) so
-        // the alternating even/odd sequence is visible down the band column. The
-        // marker replaces the line's leading space, keeping column alignment.
-        if let p = line.parity {
-            let mark = p == .even ? "\(Terminal.fg256(33))▎\(Terminal.reset)"
-                                  : "\(Terminal.fg256(208))▎\(Terminal.reset)"
-            return "\(mark)\(color)\(line.text.dropFirst())\(Terminal.reset)"
+        // Decode lines: a left-edge slot-parity marker (even=blue, odd=orange),
+        // then the line with per-callsign highlighting (CQ lines base yellow).
+        if line.message != nil {
+            let base = line.cq ? Terminal.fg256(220) : Terminal.fg256(252)
+            let mark = line.parity.map {
+                $0 == .even ? "\(Terminal.fg256(33))▎\(Terminal.reset)"
+                            : "\(Terminal.fg256(208))▎\(Terminal.reset)"
+            } ?? " "
+            return mark + colorizeCalls(String(line.text.dropFirst()), base: base)
         }
-        return "\(color)\(line.text)\(Terminal.reset)"
+        // Notes / QSO markers: rendered as-is.
+        return line.text
     }
 
     private func logNote(_ s: String) {
