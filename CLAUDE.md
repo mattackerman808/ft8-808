@@ -37,6 +37,8 @@ All radio logic lives in `FT8808Engine`; front-ends are thin.
   - `Spectrum.swift` — vDSP FFT waterfall (noise-floor-referenced scaling).
   - `QSOMessages.swift` / `QSOSequencer.swift` — message gen/parse + the QSO state machine.
   - `ADIFLog.swift` — append-only ADIF log + worked-before reader.
+  - `TQSLUploader.swift` — optional LoTW upload: shells out to the operator's
+    installed `tqsl` (see gotcha below). Pure arg/result parsing is unit-tested.
   - `RigController.swift` (protocol), `StationConfig.swift`.
 - `Sources/CHamlib/` + `Sources/HamlibRig/` — Hamlib C shim + actor `RigController`.
 - `Sources/ft8term/` — the TUI (`main.swift` is large; `Terminal.swift`, `SettingsPanel.swift`).
@@ -80,6 +82,20 @@ engine every transmit — that churn is what wedges the audio driver. The `sendi
 and normalizes to the 2500 Hz reference (−26 dB), giving WSJT-X-comparable values. Do **not**
 revert to `score * 0.5` (that's the sync score, ~always +10). Kenwood reports ALC on a 0–5
 scale (not 0–1) — the meter color threshold is naive about that; flagged, not yet rig-aware.
+
+### LoTW: shell out to `tqsl`, don't port it
+LoTW upload invokes the operator's locally-installed TrustedQSL CLI
+(`/Applications/TrustedQSL/tqsl.app/Contents/MacOS/tqsl`, or on PATH). Do **not**
+reimplement the X.509/tQSL signing crypto — `tqsl` already holds the cert, key,
+and station locations, and porting it would drag in OpenSSL/expat and muddy our
+MIT terms. The verified batch command is
+`tqsl -x -d -a compliant -u -l "<location>" <log.adi>`: `-x` batch (no GUI),
+`-d` no date dialog, `-a compliant` upload only non-duplicates (TQSL's own
+`uploaded.db` makes per-QSO uploads + retries idempotent), `-u` upload.
+`interpret()` parses TQSL's `Final Status:`/`wrote N records` lines — note a
+digit-bearing path on the `wrote` line (`…/ft8808-it.tq8`) is **not** the count;
+take the integer immediately before `records`/`QSOs`. Test without going on air:
+`ft8term --lotw-test <file.adi> --lotw-location "<name>"` (test-sign, no upload).
 
 ### Slot timing
 Slots are `floor(epoch/15)`; even parity = `:00/:30`, odd = `:15/:45`. When you answer a

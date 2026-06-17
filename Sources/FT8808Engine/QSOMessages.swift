@@ -88,11 +88,12 @@ public enum QSOMessages {
             // CQ [DIR] CALL [GRID]
             var idx = 1
             var directive: String?
-            if toks.count > 1, toks[1].count <= 4, !toks[1].contains("/"),
-               Int(toks[1]) == nil, !isGrid(toks[1]), toks.count > 2 {
-                // A short non-grid token after CQ that isn't the callsign's grid
-                // is a directive (DX/POTA/…). Heuristic but matches common usage.
-                if toks.count >= 3 { directive = toks[1]; idx = 2 }
+            if toks.count > 2, toks[1].count <= 4, !toks[1].contains("/"),
+               !toks[1].contains(where: \.isNumber) {
+                // A short, digit-free token after CQ is a directive (DX/POTA/NA/…),
+                // not the calling station: amateur callsigns always carry a digit,
+                // so e.g. "CQ NI7C DM43" keeps NI7C as the call, not a directive.
+                directive = toks[1]; idx = 2
             }
             let deCall = idx < toks.count ? toks[idx] : nil
             let grid = (idx + 1 < toks.count && isGrid(toks[idx + 1])) ? toks[idx + 1] : nil

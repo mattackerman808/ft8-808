@@ -84,7 +84,9 @@ final class App {
     private var txTask: Task<Void, Never>?    // slot-aligned scheduler loop
     private var sending = false               // a waveform is on the air right now
     private var selectedIndex: Int?           // selected decode in the activity log
-    private var bandTop = 0                    // top visible band row (frozen while selecting)
+    private var bandTop = 0                    // top visible band row
+    private var bandFollow = true              // band column tracks newest decodes (live scroll);
+                                               // an arrow press anchors it to the cursor instead
     private var workedCalls: Set<String> = []  // calls already in the ADIF log (worked-before)
 
     // Settings panel.
@@ -129,6 +131,10 @@ final class App {
         rigState = await rig.state()
         if let pendingNotice { notice = pendingNotice }
         if interactive { startKeyReader(); startRigPoll(); startClock() }
+        // Catch up LoTW on a live launch: upload anything logged while it was off
+        // (TQSL dedups, so already-sent QSOs are skipped). Skipped for batch WAV
+        // decode runs, which aren't real on-air contacts.
+        if interactive, liveSource != nil, config.lotwEnabled { uploadAllToLoTW(catchUp: true) }
         render()
         let engine = self.engine      // Sendable structs — safe to capture.
         let source = self.source
@@ -194,6 +200,7 @@ final class App {
                 if qso!.isComplete { completeQSO() }
             }
         }
+        bandFollow = true               // new traffic resumes live scrolling (arrows snap back)
         render()
     }
 
@@ -304,12 +311,15 @@ final class App {
             toggleTx()
         case UInt8(ascii: "o"), UInt8(ascii: "O"):
             toggleParity()
+        case UInt8(ascii: "u"), UInt8(ascii: "U"):
+            uploadAllToLoTW()
+
         case 13, 10:                       // Enter — answer the selected decode
             answerSelected()
         case UInt8(ascii: "k"): moveSelection(-1)   // vim-style selection fallback
         case UInt8(ascii: "j"): moveSelection(1)
         case 27:                                    // Esc — clear selection, else abandon QSO
-            if selectedIndex != nil { selectedIndex = nil; render() }
+            if selectedIndex != nil { selectedIndex = nil; bandFollow = true; render() }
             else if qso != nil { disableTx(); qso = nil; notice = "QSO cleared"; render() }
         default:
             break
@@ -359,12 +369,15 @@ final class App {
 
     private func applySettings() {
         guard let ed = settings else { return }
+        let wasLotwOn = config.lotwEnabled
         ed.apply(to: &config)
         saveConfig()
         settings = nil
         mode = .receive
         notice = "settings saved — restart to apply rig/audio/proto changes"
         render()
+        // Just enabled LoTW: catch up the existing log now (don't wait for a relaunch).
+        if config.lotwEnabled && !wasLotwOn { uploadAllToLoTW(catchUp: true) }
     }
 
     private func settingsKey(_ c: UInt8) {
@@ -567,6 +580,7 @@ final class App {
         txParity = (activity[i].parity ?? SlotClock.parity(at: Date())).toggled
         setTxOffset(m.frequencyHz)              // call on their frequency
         selectedIndex = nil                     // clear: panel now shows the live QSO
+        bandFollow = true
         txEnabled = true
         startTxLoop()
         notice = "answering \(dx) — TX \(txParity == .even ? "even" : "odd") slot"
@@ -638,8 +652,62 @@ final class App {
             let url = try ADIFLog.append(rec)
             workedCalls.insert(q.dxCall.uppercased())
             notice = "✓ logged \(q.dxCall) → \(url.lastPathComponent)"
+            if config.lotwEnabled { uploadToLoTW(ADIFLog.record(rec), call: q.dxCall) }
         } catch {
             notice = "QSO done but ADIF log failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Sign + upload one freshly-logged QSO to LoTW via TrustedQSL, off the main
+    /// actor so the TUI stays responsive. The result lands back in the notice
+    /// line. TQSL dedups, so this is safe to fire per-QSO.
+    private func uploadToLoTW(_ adifBody: String, call: String) {
+        guard let location = config.lotwLocation, !location.isEmpty else {
+            notice = "LoTW on but no station location set — use --lotw-location"; return
+        }
+        notice = "↑ LoTW signing \(call)…"; render()
+        let path = config.tqslPath
+        Task.detached(priority: .utility) {
+            let outcome = TQSLUploader.uploadRecords(adifBody, location: location, binary: path)
+            await MainActor.run {
+                switch outcome {
+                case .uploaded(let n):  self.notice = "✓ LoTW: uploaded \(call)\(n > 1 ? " (\(n) QSOs)" : "")"
+                case .nothingNew:       self.notice = "✓ LoTW: \(call) already uploaded"
+                case .failure(let why): self.notice = "LoTW upload failed: \(why)"
+                }
+                self.render()
+            }
+        }
+    }
+
+    /// Sign + upload the *entire* ADIF log to LoTW. TQSL's `uploaded.db` (and
+    /// `-a compliant`) means only QSOs not yet sent actually go up, so this is
+    /// the "catch up anything logged while LoTW was off" path — safe to run on
+    /// startup or on demand. `catchUp` keeps it quiet when there's nothing to do
+    /// and nothing to nag about (e.g. an automatic run with no location set).
+    private func uploadAllToLoTW(catchUp: Bool = false) {
+        guard let location = config.lotwLocation, !location.isEmpty else {
+            if !catchUp { notice = "set a LoTW station location in [S]ettings first"; render() }
+            return
+        }
+        let logPath = ADIFLog.defaultURL().path
+        guard FileManager.default.fileExists(atPath: logPath) else {
+            if !catchUp { notice = "no ADIF log to upload yet"; render() }
+            return
+        }
+        notice = catchUp ? "↑ LoTW: syncing log…" : "↑ LoTW: uploading log…"; render()
+        let path = config.tqslPath
+        Task.detached(priority: .utility) {
+            let outcome = TQSLUploader.upload(adifPath: logPath, location: location, binary: path)
+            await MainActor.run {
+                switch outcome {
+                case .uploaded(let n):  self.notice = "✓ LoTW: uploaded \(n) QSO(s)"
+                case .nothingNew:       self.notice = catchUp ? "✓ LoTW: log up to date"
+                                                              : "✓ LoTW: nothing new to upload"
+                case .failure(let why): self.notice = "LoTW \(catchUp ? "sync" : "upload") failed: \(why)"
+                }
+                self.render()
+            }
         }
     }
 
@@ -659,7 +727,7 @@ final class App {
 
     /// Navigation controls under the LEFT (band) column — they act on it.
     private func bandControls() -> String {
-        " \(Terminal.dim)↑↓/jk\(Terminal.reset) pick   \(Terminal.dim)⏎\(Terminal.reset) answer"
+        " \(Terminal.dim)↑↓/jk\(Terminal.reset) pick   \(Terminal.dim)⏎\(Terminal.reset) answer   \(Terminal.dim)esc\(Terminal.reset) clear"
     }
 
     /// QSO/TX controls at the bottom of the RIGHT column (near the QSO panel).
@@ -711,6 +779,7 @@ final class App {
         } else {
             selectedIndex = idxs.last   // first press selects the newest (bottom of view)
         }
+        bandFollow = false              // anchor the window to the cursor (snap it back into view)
         render()
     }
 
@@ -909,7 +978,9 @@ final class App {
 
         // Global app controls at the top; QSO controls live with the QSO panel.
         out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[T]\(Terminal.reset)une  "
-            + "\(Terminal.bold)[F]\(Terminal.reset)ind  \(Terminal.bold)[S]\(Terminal.reset)ettings\r\n"
+            + "\(Terminal.bold)[F]\(Terminal.reset)ind  \(Terminal.bold)[S]\(Terminal.reset)ettings"
+            + (config.lotwEnabled ? "  \(Terminal.bold)[U]\(Terminal.reset)pload" : "")
+            + "\r\n"
 
         // FT8 15 s cycle progress bar.
         out += renderCycleBar(width: width) + "\r\n"
@@ -937,13 +1008,16 @@ final class App {
         // Left column reserves its last row for the band/navigation controls.
         let bandHeight = max(1, height - 1)
 
-        // Band column (left): when nothing is selected, follow the newest
-        // decodes. While selecting, FREEZE the window (so neither arrow presses
-        // nor newly-arriving decodes shift the column) and scroll only when the
-        // cursor would leave the view. `bandTop` persists across renders.
+        // Band column (left): live-scroll by default — the window tracks the
+        // newest decodes even while a decode is selected, so traffic keeps
+        // flowing and the highlight just rides along (scrolling off the top as
+        // it ages). An arrow press flips `bandFollow` off and anchors the window
+        // to the cursor (snapping it back into view); the next slot's decodes
+        // turn following back on. `bandTop` persists across renders.
         let bandAll = activity.enumerated().filter { $0.element.message != nil }
         let n = bandAll.count
-        if let sel = selectedIndex, let pos = bandAll.firstIndex(where: { $0.offset == sel }) {
+        if !bandFollow, let sel = selectedIndex,
+           let pos = bandAll.firstIndex(where: { $0.offset == sel }) {
             if pos < bandTop { bandTop = pos }                                  // cursor above window
             else if pos >= bandTop + bandHeight { bandTop = pos - bandHeight + 1 } // below window
             bandTop = max(0, min(bandTop, max(0, n - bandHeight)))
@@ -1312,6 +1386,13 @@ func usage() -> Never {
                                          e.g. ftdx101d,/dev/cu.usbserial-0,38400
         --audio <name>   --out <name>    capture / TX device (rig codec)
         --ft4 | --ft8                    protocol
+        --lotw | --no-lotw               auto sign + upload each QSO to LoTW (TrustedQSL)
+        --lotw-location <name>           TQSL station location (e.g. "Cypress")
+        --tqsl <path>                    override the tqsl binary path
+
+      LoTW (run + exit):
+        --lotw-upload <file.adi>         sign + upload an existing ADIF, then exit
+        --lotw-test <file.adi>           test-sign an ADIF (no upload), then exit
 
     Configure once, then just run: ft8term
 
@@ -1319,6 +1400,7 @@ func usage() -> Never {
       ←/→ or ,/.   move TX cursor (offset)      <  >   coarse
       F            auto-pick the quietest slice
       T            tune (key TX + tone; +/- set drive; A auto-tune)
+      U            upload the whole log to LoTW (when LoTW is on)
       Q            quit
 
     """.utf8))
@@ -1481,12 +1563,35 @@ if let r = flagValue("--rig")   { config.rigSpec = r }
 if let a = flagValue("--audio") { config.audioInput = a }
 if let o = flagValue("--out")   { config.audioOutput = o }
 if args.contains("--ft4") { config.proto = "ft4" } else if args.contains("--ft8") { config.proto = "ft8" }
+if args.contains("--lotw") { config.lotwEnabled = true }
+if args.contains("--no-lotw") { config.lotwEnabled = false }
+if let l = flagValue("--lotw-location") { config.lotwLocation = l }
+if let t = flagValue("--tqsl") { config.tqslPath = t }
 try? ConfigStore.save(config)
+
+// --lotw-upload <file.adi> / --lotw-test <file.adi>: sign (and for upload, send)
+// an existing ADIF via TrustedQSL, then exit. Handy for batch uploads and for
+// testing the LoTW path without going on the air.
+for (flag, test) in [("--lotw-upload", false), ("--lotw-test", true)] {
+    guard let file = flagValue(flag) else { continue }
+    guard let location = config.lotwLocation else {
+        errExit("\(flag): no station location — pass --lotw-location \"<name>\"")
+    }
+    guard FileManager.default.fileExists(atPath: file) else { errExit("file not found: \(file)") }
+    let outcome = TQSLUploader.upload(adifPath: file, location: location,
+                                      binary: config.tqslPath, testSign: test)
+    switch outcome {
+    case .uploaded(let n): print(test ? "test-signed \(n) QSO(s)" : "uploaded \(n) QSO(s) to LoTW"); exit(0)
+    case .nothingNew:      print("nothing to do — all QSOs already uploaded"); exit(0)
+    case .failure(let w):  errExit("LoTW \(test ? "test-sign" : "upload") failed: \(w)")
+    }
+}
 
 let proto: FT8Protocol = config.proto == "ft4" ? .ft4 : .ft8
 
 // Positional args = tokens that aren't flags or flag values.
-let valueFlags: Set<String> = ["--rig", "--audio", "--out", "--call", "--grid"]
+let valueFlags: Set<String> = ["--rig", "--audio", "--out", "--call", "--grid",
+                               "--lotw-location", "--tqsl", "--lotw-upload", "--lotw-test"]
 var positionals: [String] = []
 do {
     var i = 1

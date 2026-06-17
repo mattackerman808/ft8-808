@@ -56,6 +56,30 @@ final class QSOMessagesTests: XCTestCase {
         XCTAssertEqual(p?.grid, "CM97")
     }
 
+    func testParseCQFourCharCall() {
+        // A 4-char callsign (with a digit) must not be mistaken for a directive.
+        for (msg, call, grid) in [("CQ NI7C DM43", "NI7C", "DM43"),
+                                  ("CQ NH6D BL02", "NH6D", "BL02")] {
+            let p = QSOMessages.parse(msg)
+            XCTAssertEqual(p?.isCQ, true, msg)
+            XCTAssertNil(p?.directive, msg)
+            XCTAssertEqual(p?.deCall, call, msg)
+            XCTAssertEqual(p?.grid, grid, msg)
+        }
+    }
+
+    func testParseCQDirective() {
+        let p = QSOMessages.parse("CQ DX W1AW FN31")
+        XCTAssertEqual(p?.directive, "DX")
+        XCTAssertEqual(p?.deCall, "W1AW")
+        XCTAssertEqual(p?.grid, "FN31")
+
+        // Digit-free 4-char directives still work (POTA), call still parses.
+        let q = QSOMessages.parse("CQ POTA K4SWL EM85")
+        XCTAssertEqual(q?.directive, "POTA")
+        XCTAssertEqual(q?.deCall, "K4SWL")
+    }
+
     func testParseDirectedReportAndReply() {
         let rep = QSOMessages.parse("N6ACK K1ABC -12")
         XCTAssertEqual(rep?.toCall, "N6ACK")
