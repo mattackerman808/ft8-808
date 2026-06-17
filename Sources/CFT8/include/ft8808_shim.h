@@ -22,7 +22,7 @@ typedef struct {
     float freq_hz;   // audio frequency offset within the passband
     float time_sec;  // time offset of the message start within the slot
     int   score;     // Costas sync score (higher = stronger candidate)
-    float snr_db;    // APPROXIMATE SNR (score*0.5) — TODO: proper power estimate
+    float snr_db;    // Estimated SNR in dB, 2500 Hz reference (WSJT-X-comparable)
 } ft8808_decoded_t;
 
 // Decode FT8/FT4 from a block of mono float PCM samples in [-1, +1].

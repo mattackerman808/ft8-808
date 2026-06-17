@@ -85,6 +85,59 @@ static ftx_callsign_hash_interface_t g_hash_if = {
 };
 
 // ---------------------------------------------------------------------------
+// SNR estimate. The waterfall stores per-bin magnitudes in dB. At the 21 FT8
+// sync (Costas) symbols the transmitted tone is known, so we can separate
+// signal+noise (the expected tone) from noise (the other 7 tones) without
+// depending on the decode. We then normalize the per-bin (~6.25 Hz) noise to
+// the 2500 Hz reference WSJT-X reports against (−10·log10(2500/6.25) ≈ −26 dB).
+// Replaces the old `score * 0.5` proxy, which was a sync score, not SNR.
+
+// Pointer to symbol 0 of the candidate (mirrors decode.c's get_cand_mag).
+static const WF_ELEM_T* ft8808_cand_mag(const ftx_waterfall_t* wf,
+                                        const ftx_candidate_t* c) {
+    int32_t offset = c->time_offset;
+    offset = (offset * wf->time_osr) + c->time_sub;
+    offset = (offset * wf->freq_osr) + c->freq_sub;
+    offset = (offset * wf->num_bins) + c->freq_offset;
+    return wf->mag + offset;
+}
+
+static float ft8808_estimate_snr(const ftx_waterfall_t* wf,
+                                 const ftx_candidate_t* cand) {
+    const WF_ELEM_T* mag_cand = ft8808_cand_mag(wf, cand);
+    double sig_sum = 0.0, noise_sum = 0.0;
+    int sig_n = 0, noise_n = 0;
+
+    for (int m = 0; m < FT8_NUM_SYNC; ++m) {
+        for (int k = 0; k < FT8_LENGTH_SYNC; ++k) {
+            int block = (FT8_SYNC_OFFSET * m) + k;
+            int block_abs = cand->time_offset + block;
+            if (block_abs < 0) continue;
+            if (block_abs >= wf->num_blocks) break;
+
+            const WF_ELEM_T* p8 = mag_cand + (block * wf->block_stride);
+            int sm = kFT8_Costas_pattern[k];   // expected tone
+            for (int tone = 0; tone < 8; ++tone) {
+                double lin = pow(10.0, WF_ELEM_MAG(p8[tone]) / 10.0);
+                if (tone == sm) { sig_sum += lin; ++sig_n; }
+                else            { noise_sum += lin; ++noise_n; }
+            }
+        }
+    }
+    if (sig_n == 0 || noise_n == 0) return -24.0f;
+
+    double signal_plus_noise = sig_sum / sig_n;
+    double noise = noise_sum / noise_n;
+    double signal = signal_plus_noise - noise;
+    if (signal < 1e-12) signal = 1e-12;
+
+    double snr = 10.0 * log10(signal / noise) - 26.0;  // → 2500 Hz reference
+    if (snr < -28.0) snr = -28.0;
+    if (snr >  40.0) snr =  40.0;
+    return (float)snr;
+}
+
+// ---------------------------------------------------------------------------
 int ft8808_decode_samples(const float* samples,
                           int num_samples,
                           int sample_rate,
@@ -168,7 +221,7 @@ int ft8808_decode_samples(const float* samples,
         o->freq_hz  = freq_hz;
         o->time_sec = time_sec;
         o->score    = cand->score;
-        o->snr_db   = cand->score * 0.5f; // TODO: real SNR estimate
+        o->snr_db   = ft8808_estimate_snr(wf, cand);
     }
 
     monitor_free(&mon);
