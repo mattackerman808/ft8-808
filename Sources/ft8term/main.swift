@@ -627,10 +627,18 @@ final class App {
         return nil
     }
 
+    /// QSO controls, shown at the bottom of the right column (near the QSO).
+    private func qsoControls() -> String {
+        " \(Terminal.bold)[C]\(Terminal.reset)Q  \(Terminal.dim)↑↓/jk\(Terminal.reset) pick  "
+        + "\(Terminal.dim)⏎\(Terminal.reset) answer  \(Terminal.dim)esc\(Terminal.reset) clear  "
+        + "\(Terminal.bold)[E]\(Terminal.reset) TX  \(Terminal.bold)[O]\(Terminal.reset) slot"
+    }
+
     /// WSJT-X-style state panel: DX call/grid + the Tx1–Tx6 sequence with the
-    /// current step highlighted. Returns [] when there's nothing to show.
+    /// current step highlighted, then a QSO-controls line. Always non-empty (the
+    /// controls show even when idle, so they sit with the QSO area not the top).
     private func qsoPanel(width: Int) -> [String] {
-        guard let (q, preview) = activeOrPreviewQSO() else { return [] }
+        guard let (q, preview) = activeOrPreviewQSO() else { return [qsoControls()] }
         let mc = q.myCall, mg = q.myGrid, dx = q.dxCall, r = q.reportToSend
         let rows: [(String, String, QSOSequencer.Phase)] = [
             ("Tx1", dx.isEmpty ? "" : QSOMessages.reply(dx: dx, myCall: mc, myGrid: mg), .reply),
@@ -656,6 +664,7 @@ final class App {
             let tag = cur ? "  \(Terminal.fg256(preview ? 244 : 196))\(preview ? "next" : "now")\(Terminal.reset)" : ""
             lines.append("  \(marker) \(style)\(label)  \(body)\(Terminal.reset)\(tag)")
         }
+        lines.append(qsoControls())
         return lines
     }
 
@@ -861,12 +870,9 @@ final class App {
         out += Terminal.dim + " \(utc)  " + Terminal.reset
         out += rigLine + "  \(station)\r\n"
 
-        // Key hints (kept at the top so they never collide with the status bar).
-        out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[C]\(Terminal.reset)Q  "
-            + "\(Terminal.dim)↑↓/jk\(Terminal.reset) pick  \(Terminal.dim)⏎\(Terminal.reset) answer  "
-            + "\(Terminal.dim)esc\(Terminal.reset) clear  \(Terminal.bold)[E]\(Terminal.reset) TX  "
-            + "\(Terminal.bold)[O]\(Terminal.reset) slot  \(Terminal.bold)[T]\(Terminal.reset)une  "
-            + "\(Terminal.bold)[F]\(Terminal.reset)ind  \(Terminal.bold)[S]\(Terminal.reset)et\r\n"
+        // Global app controls at the top; QSO controls live with the QSO panel.
+        out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[T]\(Terminal.reset)une  "
+            + "\(Terminal.bold)[F]\(Terminal.reset)ind  \(Terminal.bold)[S]\(Terminal.reset)ettings\r\n"
 
         // FT8 15 s cycle progress bar.
         out += renderCycleBar(width: width) + "\r\n"
