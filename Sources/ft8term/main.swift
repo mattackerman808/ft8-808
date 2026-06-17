@@ -568,12 +568,16 @@ final class App {
 
         let player = WaveformPlayer(samples: body, amplitude: Self.amplitude(fromDb: txLevelDb))
         let out = TxAudioOutput(player: player, sampleRate: Double(sr), device: outDevice)
-        liveSource?.suspend()                     // free the codec from capture
+        // Do NOT suspend RX capture: the rig exposes its codec as separate input
+        // (RX) and output (TX) CoreAudio devices, so the capture AVAudioEngine and
+        // the TX AUHAL output run on different devices and don't fight. Tearing
+        // capture down and rebuilding it every transmit was what wedged the audio
+        // driver. The `sending` flag makes apply() drop the TX-monitor slots.
         do {
             try await rig.setPTT(true)
             try out.start()
         } catch {
-            out.stop(); try? await rig.setPTT(false); liveSource?.resume()
+            out.stop(); try? await rig.setPTT(false)
             notice = "TX start failed: \(error)"; disableTx(); render(); return
         }
         sending = true
@@ -590,7 +594,6 @@ final class App {
         sending = false
         rigState.transmitting = false
         render()
-        await resumeCapture()            // settle + retry so RX reliably comes back
     }
 
     /// Find the clean drive level by sweeping and reading the POWER curve: below
