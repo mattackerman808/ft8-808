@@ -91,6 +91,9 @@ final class App {
         db <= -90 ? 0 : pow(10, db / 20)
     }
 
+    /// Half-width of the Rx-frequency filter for the right column (Hz).
+    private static let rxFilterTolHz: Float = 12
+
     private let pendingNotice: String?
 
     init(source: any AudioSource, label: String, proto: FT8Protocol, rig: RigController,
@@ -805,25 +808,34 @@ final class App {
         out += renderTxCursor(width: width) + "\r\n"
         out += rule(width)
 
-        // Two columns: entire band (left) | my QSO traffic (right).
+        // Two columns: entire band (left) | the Rx frequency (right). The right
+        // pane filters to decodes within ±tol of the Rx/Tx audio frequency
+        // (WSJT-X's "Rx Frequency" window), plus my own Tx and to-me traffic so
+        // a QSO partner who drifts a few Hz is never lost.
         let headerRows = 6 // status, cycle bar, rules, column header
         let spectrumRows = 9 // 8 spectrum + TX cursor row
         let footerRows = 2
         let height = max(3, rows - (headerRows + spectrumRows + footerRows + 1))
         let colW = max(18, (width - 3) / 2)
+        let rxFreq = txOffsetHz
+        let tol = Self.rxFilterTolHz
 
         out += Terminal.dim + cell(" dB   dt  freq  Band — entire passband", colW)
-            + " │ " + cell("My QSO", colW) + Terminal.reset + "\r\n"
+            + " │ " + cell("Rx \(Int(rxFreq)) Hz ±\(Int(tol))", colW) + Terminal.reset + "\r\n"
 
         let band = Array(activity.enumerated().filter { $0.element.message != nil }.suffix(height))
-        let mine = Array(activity.filter { $0.mine }.suffix(height))
+        let atRx = Array(activity.filter { line in
+            if line.mine { return true }
+            if let m = line.message { return abs(m.frequencyHz - rxFreq) <= tol }
+            return false
+        }.suffix(height))
         let bandPad = height - band.count
-        let minePad = height - mine.count
+        let rxPad = height - atRx.count
         for row in 0..<height {
             let bi = row - bandPad
             let left = bi >= 0 ? format(band[bi].element, selected: band[bi].offset == selectedIndex) : ""
-            let qi = row - minePad
-            let right = qi >= 0 ? format(mine[qi]) : ""
+            let qi = row - rxPad
+            let right = qi >= 0 ? format(atRx[qi]) : ""
             out += cell(left, colW) + "\(Terminal.dim) │ \(Terminal.reset)" + cell(right, colW) + "\r\n"
         }
 
@@ -1038,7 +1050,7 @@ final class App {
         let pre = String(repeating: " ", count: col)
         let post = String(repeating: " ", count: max(0, cols - col - 1))
         return pre + Terminal.fg256(201) + "▲" + Terminal.reset + post
-            + "  " + Terminal.fg256(201) + "TX \(Int(txOffsetHz)) Hz" + Terminal.reset
+            + "  " + Terminal.fg256(201) + "Rx/Tx \(Int(txOffsetHz)) Hz" + Terminal.reset
     }
 
     /// Bar for the drive level mapped over −60…0 dBFS.
