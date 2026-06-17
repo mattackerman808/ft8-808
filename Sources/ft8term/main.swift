@@ -601,16 +601,39 @@ final class App {
         txTask?.cancel(); txTask = nil
     }
 
-    /// The QSO reached 73 — log it to the activity feed and stop transmitting.
+    /// The QSO reached 73 — log it to the activity feed + ADIF, and stop TX.
     private func completeQSO() {
         if let q = qso {
+            let sent = QSOMessages.formatReport(q.reportToSend)
             let rcvd = q.reportReceived.map { QSOMessages.formatReport($0) } ?? "—"
             activity.append(ActivityLine(text: " \(Terminal.fg256(46))✓ QSO  \(q.dxCall)"
-                + "  sent \(QSOMessages.formatReport(q.reportToSend))  rcvd \(rcvd)\(Terminal.reset)",
+                + "  sent \(sent)  rcvd \(rcvd)\(Terminal.reset)",
                 cq: false, mine: true))
+            logQSOToADIF(q, sent: sent)
         }
         disableTx()
         qso = nil
+    }
+
+    /// Append the completed QSO to the ADIF log file.
+    private func logQSOToADIF(_ q: QSOSequencer, sent: String) {
+        let rec = ADIFRecord(
+            call: q.dxCall,
+            dateUTC: Date(),
+            freqMHz: Double(rigState.frequencyHz) / 1_000_000,
+            mode: proto == .ft4 ? "MFSK" : "FT8",
+            submode: proto == .ft4 ? "FT4" : nil,
+            rstSent: sent,
+            rstRcvd: q.reportReceived.map { QSOMessages.formatReport($0) } ?? "",
+            grid: (q.dxGrid?.isEmpty == false) ? q.dxGrid : nil,
+            myCall: config.callsign,
+            myGrid: config.grid)
+        do {
+            let url = try ADIFLog.append(rec)
+            notice = "✓ logged \(q.dxCall) → \(url.lastPathComponent)"
+        } catch {
+            notice = "QSO done but ADIF log failed: \(error.localizedDescription)"
+        }
     }
 
     /// The QSO to display in the state panel: the live one, or a preview built
@@ -627,11 +650,15 @@ final class App {
         return nil
     }
 
-    /// QSO controls, shown at the bottom of the right column (near the QSO).
+    /// Navigation controls under the LEFT (band) column — they act on it.
+    private func bandControls() -> String {
+        " \(Terminal.dim)↑↓/jk\(Terminal.reset) pick   \(Terminal.dim)⏎\(Terminal.reset) answer"
+    }
+
+    /// QSO/TX controls at the bottom of the RIGHT column (near the QSO panel).
     private func qsoControls() -> String {
-        " \(Terminal.bold)[C]\(Terminal.reset)Q  \(Terminal.dim)↑↓/jk\(Terminal.reset) pick  "
-        + "\(Terminal.dim)⏎\(Terminal.reset) answer  \(Terminal.dim)esc\(Terminal.reset) clear  "
-        + "\(Terminal.bold)[E]\(Terminal.reset) TX  \(Terminal.bold)[O]\(Terminal.reset) slot"
+        " \(Terminal.bold)[C]\(Terminal.reset)Q   \(Terminal.bold)[E]\(Terminal.reset) TX   "
+        + "\(Terminal.bold)[O]\(Terminal.reset) slot   \(Terminal.dim)esc\(Terminal.reset) clear"
     }
 
     /// WSJT-X-style state panel: DX call/grid + the Tx1–Tx6 sequence with the
@@ -897,6 +924,9 @@ final class App {
         out += Terminal.dim + cell(" dB   dt  freq  Band — entire passband", colW)
             + " │ " + cell("Rx \(Int(rxFreq)) Hz ±\(Int(tol))", colW) + Terminal.reset + "\r\n"
 
+        // Left column reserves its last row for the band/navigation controls.
+        let bandHeight = max(1, height - 1)
+
         // Band column (left): when nothing is selected, follow the newest
         // decodes. While selecting, FREEZE the window (so neither arrow presses
         // nor newly-arriving decodes shift the column) and scroll only when the
@@ -904,17 +934,18 @@ final class App {
         let bandAll = activity.enumerated().filter { $0.element.message != nil }
         let n = bandAll.count
         if let sel = selectedIndex, let pos = bandAll.firstIndex(where: { $0.offset == sel }) {
-            if pos < bandTop { bandTop = pos }                         // cursor above window
-            else if pos >= bandTop + height { bandTop = pos - height + 1 } // below window
-            bandTop = max(0, min(bandTop, max(0, n - height)))
+            if pos < bandTop { bandTop = pos }                                  // cursor above window
+            else if pos >= bandTop + bandHeight { bandTop = pos - bandHeight + 1 } // below window
+            bandTop = max(0, min(bandTop, max(0, n - bandHeight)))
         } else {
-            bandTop = max(0, n - height)                              // follow newest
+            bandTop = max(0, n - bandHeight)                                    // follow newest
         }
-        let band = Array(bandAll[bandTop..<min(n, bandTop + height)])
-        let bandPad = height - band.count
+        let band = Array(bandAll[bandTop..<min(n, bandTop + bandHeight)])
+        let bandPad = bandHeight - band.count
 
         // Right column: Rx-frequency decodes on top, QSO state panel on the
-        // bottom (separated by a thin rule).
+        // bottom (separated by a thin rule). The panel always ends with the
+        // QSO controls line, so its last row aligns with the left controls row.
         let panel = qsoPanel(width: colW)
         let rxTopRows = panel.isEmpty ? height : max(1, height - panel.count - 1)
         let atRx = Array(activity.filter { line in
@@ -925,12 +956,16 @@ final class App {
         let rxPad = rxTopRows - atRx.count
 
         for row in 0..<height {
-            // Left cell.
-            let bi = row - bandPad
+            // Left cell: band decodes, then the navigation controls on the last row.
             var left = "", leftHi = false
-            if bi >= 0 {
-                leftHi = band[bi].offset == selectedIndex
-                left = leftHi ? band[bi].element.text : format(band[bi].element)
+            if row == height - 1 {
+                left = bandControls()
+            } else {
+                let bi = row - bandPad
+                if bi >= 0 && bi < band.count {
+                    leftHi = band[bi].offset == selectedIndex
+                    left = leftHi ? band[bi].element.text : format(band[bi].element)
+                }
             }
             // Right cell: decodes, then a separator, then the panel.
             var right = ""
