@@ -301,6 +301,9 @@ final class App {
             answerSelected()
         case UInt8(ascii: "k"): moveSelection(-1)   // vim-style selection fallback
         case UInt8(ascii: "j"): moveSelection(1)
+        case 27:                                    // Esc — clear selection, else abandon QSO
+            if selectedIndex != nil { selectedIndex = nil; render() }
+            else if qso != nil { disableTx(); qso = nil; notice = "QSO cleared"; render() }
         default:
             break
         }
@@ -315,7 +318,11 @@ final class App {
         case 0x42: moveSelection(1)               // down
         case 0x43: setTxOffset(txOffsetHz + 10)   // right
         case 0x44: setTxOffset(txOffsetHz - 10)   // left
-        default: break
+        default:
+            // Diagnostic: surface an unexpected arrow code so we can see what
+            // this terminal actually sends for the arrow keys.
+            notice = "unrecognized arrow code \(dir) — use j/k to select"
+            render()
         }
     }
 
@@ -552,6 +559,7 @@ final class App {
                            myCall: config.callsign, myGrid: config.grid)
         txParity = (activity[i].parity ?? SlotClock.parity(at: Date())).toggled
         setTxOffset(m.frequencyHz)              // call on their frequency
+        selectedIndex = nil                     // clear: panel now shows the live QSO
         txEnabled = true
         startTxLoop()
         notice = "answering \(dx) — TX \(txParity == .even ? "even" : "odd") slot"
@@ -607,12 +615,15 @@ final class App {
     /// The QSO to display in the state panel: the live one, or a preview built
     /// from the currently-selected decode (so you can see what you'd send).
     private func activeOrPreviewQSO() -> (q: QSOSequencer, preview: Bool)? {
+        // A live selection previews first (so you can switch stations mid-QSO);
+        // otherwise show the active QSO.
+        if config.isStationSet, let i = selectedIndex, i < activity.count,
+           let m = activity[i].message, let p = QSOMessages.parse(m.text), let dx = p.deCall {
+            return (QSOSequencer(answer: dx, dxGrid: p.grid, heardSnr: Int(m.snrDb.rounded()),
+                                 myCall: config.callsign, myGrid: config.grid), true)
+        }
         if let q = qso { return (q, false) }
-        guard config.isStationSet, let i = selectedIndex, i < activity.count,
-              let m = activity[i].message, let p = QSOMessages.parse(m.text),
-              let dx = p.deCall else { return nil }
-        return (QSOSequencer(answer: dx, dxGrid: p.grid, heardSnr: Int(m.snrDb.rounded()),
-                             myCall: config.callsign, myGrid: config.grid), true)
+        return nil
     }
 
     /// WSJT-X-style state panel: DX call/grid + the Tx1–Tx6 sequence with the
@@ -870,7 +881,16 @@ final class App {
         out += Terminal.dim + cell(" dB   dt  freq  Band — entire passband", colW)
             + " │ " + cell("Rx \(Int(rxFreq)) Hz ±\(Int(tol))", colW) + Terminal.reset + "\r\n"
 
-        let band = Array(activity.enumerated().filter { $0.element.message != nil }.suffix(height))
+        // Band column: normally the newest decodes, but when a line is selected
+        // anchor the window so the selection stays visible as new decodes arrive.
+        let bandAll = activity.enumerated().filter { $0.element.message != nil }
+        let band: [(offset: Int, element: ActivityLine)]
+        if let sel = selectedIndex, let pos = bandAll.firstIndex(where: { $0.offset == sel }) {
+            let end = min(bandAll.count, pos + 2)        // 1 line of context below
+            band = Array(bandAll[max(0, end - height)..<end])
+        } else {
+            band = Array(bandAll.suffix(height))
+        }
         let atRx = Array(activity.filter { line in
             if line.mine { return true }
             if let m = line.message { return abs(m.frequencyHz - rxFreq) <= tol }
