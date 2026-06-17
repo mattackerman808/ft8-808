@@ -33,8 +33,10 @@ final class LevelBox: @unchecked Sendable {
 
 // ---- A line in the scrolling band-activity log (decode or note) --------------
 struct ActivityLine {
-    let text: String   // pre-formatted content
-    let cq: Bool       // highlight CQ calls
+    let text: String              // pre-formatted content
+    let cq: Bool                  // highlight CQ calls
+    var message: FT8Message? = nil    // structured decode (nil for notes / TX echo)
+    var parity: SlotParity? = nil     // slot we heard it in (for opposite-slot reply)
 }
 
 @MainActor
@@ -74,9 +76,10 @@ final class App {
     // Transmit (CQ / QSO) state.
     private var txEnabled = false             // master "Enable TX" trigger
     private var txParity: SlotParity = .even  // which 15 s sequence we transmit in
-    private var txMessage: String?            // text queued for the next matching slot
+    private var qso: QSOSequencer?            // active CQ / QSO state machine
     private var txTask: Task<Void, Never>?    // slot-aligned scheduler loop
     private var sending = false               // a waveform is on the air right now
+    private var selectedIndex: Int?           // selected decode in the activity log
 
     // Settings panel.
     private enum Mode { case receive, settings }
@@ -162,12 +165,19 @@ final class App {
             }
         }
 
+        let parity = r.startTime.map { SlotClock.parity(at: $0) }
         for m in r.messages.sorted(by: { $0.score > $1.score }) {
             let snr = String(format: "%+4.0f", m.snrDb)
             let dt = String(format: "%+4.1f", m.timeSeconds)
             let freq = String(format: "%4.0f", m.frequencyHz)
             activity.append(ActivityLine(text: " \(snr) \(dt) \(freq)  \(m.text)",
-                                         cq: m.text.hasPrefix("CQ")))
+                                         cq: m.text.hasPrefix("CQ"),
+                                         message: m, parity: parity))
+            // Advance an in-progress QSO when the DX replies to us.
+            if qso != nil, let p = QSOMessages.parse(m.text),
+               qso!.receive(p, snr: Int(m.snrDb.rounded())) {
+                if qso!.isComplete { completeQSO() }
+            }
         }
         render()
     }
@@ -279,19 +289,22 @@ final class App {
             toggleTx()
         case UInt8(ascii: "o"), UInt8(ascii: "O"):
             toggleParity()
+        case 13, 10:                       // Enter — answer the selected decode
+            answerSelected()
         default:
             break
         }
     }
 
-    /// Arrow keys: ←/→ move the TX cursor (fine), ↑/↓ move it coarse.
+    /// Arrow keys: ↑/↓ move the decode-selection cursor; ←/→ nudge the TX cursor
+    /// (fine). Coarse TX moves stay on `<`/`>`.
     private func handleArrow(_ dir: UInt8) {
         if mode == .settings { settingsArrow(dir); return }
         switch dir {
-        case 0x44: setTxOffset(txOffsetHz - 10)   // left
+        case 0x41: moveSelection(-1)              // up
+        case 0x42: moveSelection(1)               // down
         case 0x43: setTxOffset(txOffsetHz + 10)   // right
-        case 0x41: setTxOffset(txOffsetHz + 100)  // up
-        case 0x42: setTxOffset(txOffsetHz - 100)  // down
+        case 0x44: setTxOffset(txOffsetHz - 10)   // left
         default: break
         }
     }
@@ -502,26 +515,47 @@ final class App {
 
     // ---- Transmit: CQ + slot-aligned scheduling -----------------------------
 
-    /// `C` — load a CQ and start transmitting it each matching slot.
+    /// `C` — call CQ: start the sequencer in CQ mode and transmit each slot.
     private func callCQ() {
         guard requireStation() else { return }
         if tuning { Task { await stopTune(); callCQ() }; return }
-        txMessage = QSOMessages.cq(call: config.callsign, grid: config.grid,
-                                   directive: config.cqDirective)
+        qso = QSOSequencer(callCQ: config.callsign, myGrid: config.grid,
+                           directive: config.cqDirective)
         txEnabled = true
         startTxLoop()
         notice = "calling CQ on next \(txParity == .even ? "even" : "odd") slot"
         render()
     }
 
-    /// `E` — toggle the master Enable-TX trigger.
+    /// Enter — answer the selected decode: set up the QSO, reply on the DX's
+    /// frequency, and transmit in the opposite slot.
+    private func answerSelected() {
+        guard requireStation() else { return }
+        guard let i = selectedIndex, i < activity.count, let m = activity[i].message else {
+            notice = "no decode selected — ↑/↓ to pick, Enter to answer"; render(); return
+        }
+        guard let p = QSOMessages.parse(m.text), let dx = p.deCall else {
+            notice = "no callsign to answer on that line"; render(); return
+        }
+        if tuning { Task { await stopTune(); answerSelected() }; return }
+        qso = QSOSequencer(answer: dx, dxGrid: p.grid, heardSnr: Int(m.snrDb.rounded()),
+                           myCall: config.callsign, myGrid: config.grid)
+        txParity = (activity[i].parity ?? SlotClock.parity(at: Date())).toggled
+        setTxOffset(m.frequencyHz)              // call on their frequency
+        txEnabled = true
+        startTxLoop()
+        notice = "answering \(dx) — TX \(txParity == .even ? "even" : "odd") slot"
+        render()
+    }
+
+    /// `E` — toggle the master Enable-TX trigger (defaults to CQ if nothing set).
     private func toggleTx() {
         if txEnabled { disableTx(); notice = "TX disabled"; render(); return }
         guard requireStation() else { return }
         if tuning { Task { await stopTune(); toggleTx() }; return }
-        if txMessage == nil {
-            txMessage = QSOMessages.cq(call: config.callsign, grid: config.grid,
-                                       directive: config.cqDirective)
+        if qso == nil {
+            qso = QSOSequencer(callCQ: config.callsign, myGrid: config.grid,
+                               directive: config.cqDirective)
         }
         txEnabled = true
         startTxLoop()
@@ -548,6 +582,30 @@ final class App {
         txTask?.cancel(); txTask = nil
     }
 
+    /// The QSO reached 73 — log it to the activity feed and stop transmitting.
+    private func completeQSO() {
+        if let q = qso {
+            let rcvd = q.reportReceived.map { QSOMessages.formatReport($0) } ?? "—"
+            activity.append(ActivityLine(text: " \(Terminal.fg256(46))✓ QSO  \(q.dxCall)"
+                + "  sent \(QSOMessages.formatReport(q.reportToSend))  rcvd \(rcvd)\(Terminal.reset)",
+                cq: false))
+        }
+        disableTx()
+        qso = nil
+    }
+
+    /// ↑/↓ — move the decode-selection cursor over message-bearing log lines.
+    private func moveSelection(_ delta: Int) {
+        let idxs = activity.indices.filter { activity[$0].message != nil }
+        guard !idxs.isEmpty else { return }
+        if let cur = selectedIndex, let pos = idxs.firstIndex(of: cur) {
+            selectedIndex = idxs[max(0, min(idxs.count - 1, pos + delta))]
+        } else {
+            selectedIndex = delta < 0 ? idxs.last : idxs.first   // ↑ newest, ↓ oldest
+        }
+        render()
+    }
+
     /// Slot-aligned scheduler: sleep to the next matching boundary, transmit the
     /// queued message, repeat while enabled. Runs on the main actor (it only
     /// ever suspends — the audio plays on the AUHAL thread).
@@ -563,18 +621,24 @@ final class App {
         }
     }
 
-    /// Encode + synthesize the queued message and play it through the rig for
-    /// one slot, keyed via PTT. Audio starts at the slot boundary with a 0.5 s
-    /// lead so the first symbol lands at slot+0.5 s (DT ≈ 0 at receivers).
+    /// Encode + synthesize the sequencer's current message and play it for one
+    /// slot, keyed via PTT. We wait a short grace period after the boundary so
+    /// the just-ended slot's decode can land and advance the QSO — i.e. we reply
+    /// in the SAME cycle. The first symbol then lands ~grace+0.1 s into the slot
+    /// (DT ≈ +1.4 s, well within the decoder's sync window).
     private func transmitCurrentSlot() async {
-        guard txEnabled, !tuning, !sending, let text = txMessage else { return }
+        guard txEnabled, !tuning, !sending else { return }
+        // Grace: let this slot's decode advance the QSO before we pick the text.
+        try? await Task.sleep(nanoseconds: 1_300_000_000)
+        guard txEnabled, !tuning, !sending, !Task.isCancelled,
+              let text = qso?.message() else { return }
         let sr = 48_000
         let body: [Float]
         do {
             let tones = try FT8Codec.encode(text, protocol: proto)
             let msg = FT8Codec.synthesize(tones: tones, baseFrequencyHz: txOffsetHz,
                                           protocol: proto, sampleRate: sr)
-            let lead = [Float](repeating: 0, count: sr / 2)   // 0.5 s
+            let lead = [Float](repeating: 0, count: sr / 10)  // 0.1 s (grace is the lead)
             let tail = [Float](repeating: 0, count: sr / 10)  // 0.1 s guard
             body = lead + msg + tail
         } catch {
@@ -743,8 +807,9 @@ final class App {
         let footerRows = 2
         let logCapacity = max(3, rows - (headerRows + spectrumRows + footerRows + 2))
         let shown = activity.suffix(logCapacity)
-        for line in shown {
-            out += format(line) + "\r\n"
+        let startIdx = activity.count - shown.count
+        for (offset, line) in shown.enumerated() {
+            out += format(line, selected: startIdx + offset == selectedIndex) + "\r\n"
         }
         // Pad to push footer down.
         for _ in 0..<max(0, logCapacity - shown.count) { out += "\r\n" }
@@ -764,14 +829,15 @@ final class App {
                 + meterText()
                 + "  \(Terminal.dim)[+/-] [A]uto [T]stop\(Terminal.reset)"
         } else if txEnabled {
-            // Prominent TX banner: on-air state, slot, and the queued message.
+            // Prominent TX banner: on-air state, slot, DX, and the queued message.
             let onAir = sending
                 ? "\(Terminal.fg256(196))● ON AIR\(Terminal.reset)"
                 : "\(Terminal.fg256(208))○ TX armed\(Terminal.reset)"
             let par = txParity == .even ? "even" : "odd"
+            let dx = (qso?.dxCall.isEmpty == false) ? "\(Terminal.dim)→\(Terminal.reset)\(qso!.dxCall) " : ""
             out += " \(Terminal.bold)\(onAir)\(Terminal.reset)  "
-                + "\(Terminal.dim)\(par) slot\(Terminal.reset)  "
-                + "\(Terminal.fg256(45))\(txMessage ?? "")\(Terminal.reset)  "
+                + "\(Terminal.dim)\(par)\(Terminal.reset)  \(dx)"
+                + "\(Terminal.fg256(45))\(qso?.message() ?? "")\(Terminal.reset)  "
                 + "\(Terminal.dim)[E]stop [O]slot\(Terminal.reset)"
         } else if let notice, let at = noticeSetAt, Date().timeIntervalSince(at) < 8 {
             // Show a transient notice (tune result, errors…) then revert to hints.
@@ -781,7 +847,8 @@ final class App {
                 ? "\(Terminal.fg256(244))done — \(activity.count) decode(s) over \(slotCount) slot(s)\(Terminal.reset)"
                 : "\(Terminal.dim)decoding…\(Terminal.reset)"
             out += " \(Terminal.bold)[Q]\(Terminal.reset)uit \(Terminal.bold)[C]\(Terminal.reset)Q "
-                + "\(Terminal.bold)[E]\(Terminal.reset)nableTX \(Terminal.bold)[O]\(Terminal.reset)slot "
+                + "\(Terminal.dim)↑↓\(Terminal.reset)pick \(Terminal.dim)⏎\(Terminal.reset)answer "
+                + "\(Terminal.bold)[E]\(Terminal.reset)TX \(Terminal.bold)[O]\(Terminal.reset)slot "
                 + "\(Terminal.bold)[T]\(Terminal.reset)une \(Terminal.bold)[F]\(Terminal.reset)ind "
                 + "\(Terminal.bold)[S]\(Terminal.reset)et  "
                 + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)  \(status)"
@@ -790,8 +857,12 @@ final class App {
         commit(out)
     }
 
-    private func format(_ line: ActivityLine) -> String {
+    private func format(_ line: ActivityLine, selected: Bool = false) -> String {
         let color = line.cq ? Terminal.fg256(220) : Terminal.fg256(252)
+        if selected {
+            // Replace the leading space of a decode line with a cursor marker.
+            return "\(Terminal.bold)\(Terminal.fg256(45))▸\(Terminal.reset)\(color)\(line.text.dropFirst())\(Terminal.reset)"
+        }
         return "\(color)\(line.text)\(Terminal.reset)"
     }
 
