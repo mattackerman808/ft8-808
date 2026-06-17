@@ -1,0 +1,170 @@
+name: release
+
+# Build a universal (arm64 + x86_64), signed, notarized, stapled .pkg installer
+# and attach it to a GitHub Release.
+#
+# Signing/notarization are CONDITIONAL on repository secrets being present, so
+# this workflow runs as-is (producing an unsigned .pkg) until you add them — see
+# docs/releasing.md. Cut a release by pushing a tag:  git tag v1.0.0 && git push origin v1.0.0
+# Or run it manually (workflow_dispatch) to produce a build artifact without
+# creating a Release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for a manual build (no GitHub Release is created)"
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write          # create the Release / upload assets
+
+jobs:
+  build:
+    runs-on: macos-14      # Apple Silicon image; builds the universal binary
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode (Swift 6)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then V="${GITHUB_REF_NAME#v}"; else V="${{ github.event.inputs.version }}"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building ft8term $V"
+
+      - name: Build universal Hamlib
+        run: ARCHS="arm64 x86_64" Scripts/build-hamlib.sh
+
+      - name: Build ft8term (universal, release)
+        run: |
+          set -euo pipefail
+          # Build each arch separately and lipo the executables together. A
+          # simultaneous `--arch arm64 --arch x86_64` build does not resolve the
+          # Hamlib xcframework's library search path under SwiftPM (ld: library
+          # not found for -lhamlib.4). The bundled dylib is already universal.
+          swift build -c release --arch arm64  --product ft8term
+          swift build -c release --arch x86_64 --product ft8term
+          ARM_DIR="$(swift build -c release --arch arm64  --show-bin-path)"
+          X86_DIR="$(swift build -c release --arch x86_64 --show-bin-path)"
+          mkdir -p "$RUNNER_TEMP/uni"
+          BIN="$RUNNER_TEMP/uni/ft8term"
+          DYLIB="$RUNNER_TEMP/uni/libhamlib.4.dylib"
+          lipo -create "$ARM_DIR/ft8term" "$X86_DIR/ft8term" -output "$BIN"
+          cp "$ARM_DIR/libhamlib.4.dylib" "$DYLIB"
+          echo "BIN=$BIN"     >> "$GITHUB_ENV"
+          echo "DYLIB=$DYLIB" >> "$GITHUB_ENV"
+
+      - name: Verify universal slices
+        run: |
+          echo "ft8term: $(lipo -archs "$BIN")"
+          echo "hamlib:  $(lipo -archs "$DYLIB")"
+          lipo -archs "$BIN" | grep -q arm64
+          lipo -archs "$BIN" | grep -q x86_64
+
+      - name: Detect signing config
+        id: cfg
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          ACKEY: ${{ secrets.AC_API_KEY_P8 }}
+        run: |
+          [ -n "$CERT" ]  && echo "sign=true"     >> "$GITHUB_OUTPUT" || echo "sign=false"     >> "$GITHUB_OUTPUT"
+          [ -n "$ACKEY" ] && echo "notarize=true" >> "$GITHUB_OUTPUT" || echo "notarize=false" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID certificates
+        if: steps.cfg.outputs.sign == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KPWD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KPWD" "$KCHAIN"
+          security set-keychain-settings -lut 21600 "$KCHAIN"
+          security unlock-keychain -p "$KPWD" "$KCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          # Put our keychain first in the search list so codesign/productsign find it.
+          security list-keychains -d user -s "$KCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPWD" "$KCHAIN" >/dev/null
+          APP_ID="$(security find-identity -v "$KCHAIN"  | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+          INST_ID="$(security find-identity -v "$KCHAIN" | grep 'Developer ID Installer'   | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+          echo "APP_ID=$APP_ID"   >> "$GITHUB_ENV"
+          echo "INST_ID=$INST_ID" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "Application identity: ${APP_ID:-<none>}"
+          echo "Installer identity:   ${INST_ID:-<none>}"
+
+      - name: Codesign binaries (hardened runtime)
+        if: steps.cfg.outputs.sign == 'true'
+        run: |
+          set -euo pipefail
+          # Sign the dylib first; library validation requires it be signed by the
+          # same team as the binary that loads it.
+          codesign --force --options runtime --timestamp --sign "$APP_ID" "$DYLIB"
+          codesign --force --options runtime --timestamp \
+            --entitlements Scripts/ft8term.entitlements \
+            --sign "$APP_ID" "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+
+      - name: Build .pkg installer
+        id: pkg
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          STAGE="$RUNNER_TEMP/stage/usr/local/bin"
+          mkdir -p "$STAGE"
+          cp "$BIN" "$DYLIB" "$STAGE/"
+          pkgbuild --root "$RUNNER_TEMP/stage" \
+            --identifier org.808.ft8term \
+            --version "$V" \
+            --install-location / \
+            "$RUNNER_TEMP/ft8term-unsigned.pkg"
+          OUT="ft8term-$V.pkg"
+          if [ "${{ steps.cfg.outputs.sign }}" = "true" ] && [ -n "${INST_ID:-}" ]; then
+            productsign --sign "$INST_ID" "$RUNNER_TEMP/ft8term-unsigned.pkg" "$OUT"
+          else
+            cp "$RUNNER_TEMP/ft8term-unsigned.pkg" "$OUT"
+            echo "::warning::No Developer ID Installer identity — shipping an UNSIGNED .pkg."
+          fi
+          echo "pkg=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize + staple
+        if: steps.cfg.outputs.sign == 'true' && steps.cfg.outputs.notarize == 'true'
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          echo "$AC_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/ac_key.p8"
+          xcrun notarytool submit "${{ steps.pkg.outputs.pkg }}" \
+            --key "$RUNNER_TEMP/ac_key.p8" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "${{ steps.pkg.outputs.pkg }}"
+          rm -f "$RUNNER_TEMP/ac_key.p8"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ft8term-pkg
+          path: ${{ steps.pkg.outputs.pkg }}
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "${{ steps.pkg.outputs.pkg }}" \
+            --title "$GITHUB_REF_NAME" --generate-notes \
+          || gh release upload "$GITHUB_REF_NAME" "${{ steps.pkg.outputs.pkg }}" --clobber
