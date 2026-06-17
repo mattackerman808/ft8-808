@@ -2,11 +2,26 @@ import Foundation
 import FT8Codec
 import FT8808Engine
 import HamlibRig
+import AVFoundation
+import CoreAudio
 #if canImport(Glibc)
 import Glibc
 #else
 import Darwin
 #endif
+
+/// Thread-safe level accumulator for the `--meter` capture probe (the audio tap
+/// runs on a real-time thread; the main loop reads snapshots).
+final class LevelBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peak: Float = 0, rms: Float = 0, frames: Int = 0
+    func update(peak p: Float, rms r: Float, frames f: Int) {
+        lock.lock(); peak = max(peak, p); rms = r; frames += f; lock.unlock()
+    }
+    func snapshot() -> (peak: Float, rms: Float, frames: Int) {
+        lock.lock(); defer { peak = 0; lock.unlock() }; return (peak, rms, frames)
+    }
+}
 
 // ft8term — terminal FT8 client. Milestone 1 increment: drive the engine from a
 // recorded WAV and render a live status line, spectrum, and band-activity log.
@@ -1090,6 +1105,57 @@ if let i = args.firstIndex(of: "--tone") {
     }
     try? await Task.sleep(nanoseconds: 5_000_000_000)
     tone.stop()
+    print("done.")
+    exit(0)
+}
+
+// --meter [device]: probe OUR capture path — chosen input device, its hardware
+// format, and the live signal level — to see whether the app can capture (vs.
+// the device working in other apps). Mirrors LiveAudioSource's device selection.
+if let i = args.firstIndex(of: "--meter") {
+    let arg: String? = (i + 1 < args.count && !args[i + 1].hasPrefix("--")) ? args[i + 1] : nil
+    let query = arg ?? config.audioInput
+    print("Input probe — query: \(query ?? "system default input")")
+
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized: print("mic permission: authorized")
+    case .notDetermined:
+        print("mic permission: requesting…")
+        let ok = await AVCaptureDevice.requestAccess(for: .audio)
+        print("mic permission: \(ok ? "granted" : "DENIED")")
+    case .denied, .restricted:
+        print("mic permission: DENIED — enable your terminal under System Settings ▸ Privacy & Security ▸ Microphone")
+    @unknown default: break
+    }
+
+    var deviceID: AudioDeviceID? = nil
+    if let q = query {
+        if let dev = AudioDevices.find(q, scope: .input) {
+            print("selected device: \(dev.name)  id=\(dev.id)  inCh=\(dev.channels)")
+            deviceID = dev.id
+        } else {
+            print("NO input device matched query \"\(q)\" — using system default")
+        }
+    } else {
+        print("using system default input")
+    }
+
+    // Raw AUHAL capture at 12 kHz mono (the real receive path).
+    let box = LevelBox()
+    let cap = AudioCaptureUnit(deviceID: deviceID, sampleRate: 12_000) { samples in
+        var peak: Float = 0
+        for v in samples { peak = max(peak, abs(v)) }
+        box.update(peak: peak, rms: 0, frames: samples.count)
+    }
+    do { try cap.start() } catch { print("capture start FAILED: \(error)"); exit(1) }
+    print("capturing 4 s via raw AUHAL (12 kHz mono) …")
+    for _ in 0..<8 {
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let s = box.snapshot()
+        let pdb = s.peak > 0 ? 20 * log10(s.peak) : -120
+        print(String(format: "  peak %6.1f dBFS   frames %d", pdb, s.frames))
+    }
+    cap.stop()
     print("done.")
     exit(0)
 }
