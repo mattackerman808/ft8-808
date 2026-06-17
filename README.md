@@ -47,6 +47,12 @@ auto-sequence the exchange through to `73`, log it to ADIF, all from the keyboar
   (CQ → grid → report → R-report → RR73 → 73), then auto-completes.
 - **ADIF logging** — every QSO appended to `~/.config/ft8-808/ft8-808.adi`, importable
   into LoTW / QRZ / Club Log.
+- **LoTW auto-upload** — optional: each logged QSO is signed and uploaded to ARRL
+  Logbook of The World via your installed [TrustedQSL](https://lotw.arrl.org/lotw-help/cmdline/)
+  (`tqsl`). Enable in **[S]ettings** (or `--lotw --lotw-location "<name>"`). On
+  launch (and on enabling) it catches up the whole log — anything logged while it
+  was off — and **U** uploads the whole log on demand. TQSL dedups, so nothing is
+  sent twice.
 - **Self-contained** — one `swift build`; Hamlib ships as a relocatable xcframework.
 
 ## Quick start

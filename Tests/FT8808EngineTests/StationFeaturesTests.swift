@@ -66,4 +66,35 @@ final class StationConfigTests: XCTestCase {
         XCTAssertEqual(cfg, StationConfig())
         XCTAssertFalse(cfg.isStationSet)
     }
+
+    /// A config.json written before the LoTW fields existed must still load
+    /// (with LoTW defaulting off) — not fail to decode, which would silently
+    /// wipe the saved station.
+    func testLegacyConfigWithoutLoTWFieldsDecodes() throws {
+        let url = tempURL()
+        let legacy = """
+        { "callsign": "N6ACK", "grid": "CM97AH", "txOffsetHz": 1500,
+          "txDriveDb": -30, "proto": "ft8" }
+        """
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try legacy.write(to: url, atomically: true, encoding: .utf8)
+        let cfg = ConfigStore.load(from: url)
+        XCTAssertEqual(cfg.callsign, "N6ACK")     // station survived
+        XCTAssertEqual(cfg.grid, "CM97AH")
+        XCTAssertFalse(cfg.lotwEnabled)           // new field defaulted, didn't throw
+        XCTAssertNil(cfg.lotwLocation)
+        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+    }
+
+    func testLoTWFieldsRoundTrip() throws {
+        let url = tempURL()
+        var cfg = StationConfig(callsign: "N6ACK", grid: "CM97AH")
+        cfg.lotwEnabled = true
+        cfg.lotwLocation = "Cypress"
+        cfg.tqslPath = "/Applications/TrustedQSL/tqsl.app/Contents/MacOS/tqsl"
+        try ConfigStore.save(cfg, to: url)
+        XCTAssertEqual(ConfigStore.load(from: url), cfg)
+        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+    }
 }

@@ -41,11 +41,25 @@ final class SettingsEditor {
         return r
     }
 
+    /// The tqsl path that auto-resolves with no override — so apply() can tell
+    /// "left as detected" (keep auto) from "user typed a custom path" (override).
+    private let autoTqslPath: String
+
     init(config: StationConfig, serialPorts: [SerialPort],
          inputDevices: [AudioInputDevice], outputDevices: [AudioInputDevice]) {
         self.serialPorts = serialPorts
         self.inputDevices = inputDevices
         self.outputDevices = outputDevices
+
+        // LoTW station locations come from the operator's TrustedQSL data; keep
+        // the currently-saved one even if it isn't (yet) in that list.
+        var lotwLocs = TQSLUploader.stationLocations()
+        if let cur = config.lotwLocation, !cur.isEmpty, !lotwLocs.contains(cur) {
+            lotwLocs.insert(cur, at: 0)
+        }
+        if lotwLocs.isEmpty { lotwLocs = ["none"] }
+
+        autoTqslPath = TQSLUploader.resolveBinary() ?? ""
 
         fields = [
             Field(label: "Call",      kind: .text),
@@ -56,6 +70,9 @@ final class SettingsEditor {
             Field(label: "Audio in",  kind: .choice(["default"] + inputDevices.map(\.name))),
             Field(label: "Audio out", kind: .choice(["default"] + outputDevices.map(\.name))),
             Field(label: "Proto",     kind: .choice(["ft8", "ft4"])),
+            Field(label: "LoTW",      kind: .choice(["off", "on"])),
+            Field(label: "LoTW loc",  kind: .choice(lotwLocs)),
+            Field(label: "tqsl",      kind: .text),
         ]
 
         rigFieldIndex = 2
@@ -91,6 +108,9 @@ final class SettingsEditor {
             inValue,
             outValue,
             config.proto,
+            config.lotwEnabled ? "on" : "off",
+            config.lotwLocation?.isEmpty == false ? config.lotwLocation! : lotwLocs[0],
+            config.tqslPath ?? autoTqslPath,
         ]
     }
 
@@ -190,6 +210,18 @@ final class SettingsEditor {
         case "Rig":
             if value == "none" { return "no rig control" }
             return RigSpec.aliases[value].map { "Hamlib model \($0)" }
+        case "LoTW":
+            if value == "off" { return "LoTW auto-upload off" }
+            return TQSLUploader.resolveBinary() != nil
+                ? "sign + upload each QSO via tqsl"
+                : "tqsl not found — install TrustedQSL"
+        case "LoTW loc":
+            if value == "none" { return "no station location — set one up in TrustedQSL" }
+            return "TQSL station location"
+        case "tqsl":
+            if value.isEmpty { return "tqsl not found — install TrustedQSL or type a path" }
+            if !FileManager.default.isExecutableFile(atPath: value) { return "no executable at this path" }
+            return value == autoTqslPath ? "auto-detected" : "custom path (overrides auto-detect)"
         default:
             return nil
         }
@@ -229,6 +261,13 @@ final class SettingsEditor {
         config.audioInput = values[5] == "default" ? nil : values[5]
         config.audioOutput = values[6] == "default" ? nil : values[6]
         config.proto = values[7]
+        config.lotwEnabled = values[8] == "on"
+        let loc = values[9].trimmingCharacters(in: .whitespaces)
+        config.lotwLocation = (loc.isEmpty || loc == "none") ? nil : loc
+        // Only persist a tqsl path when it's a real override; leaving it at the
+        // auto-detected value keeps auto-resolution (survives a TQSL move/update).
+        let tqsl = values[10].trimmingCharacters(in: .whitespaces)
+        config.tqslPath = (tqsl.isEmpty || tqsl == autoTqslPath) ? nil : tqsl
     }
 
     static func splitRig(_ spec: String?) -> (rig: String, serial: String, baud: String) {
