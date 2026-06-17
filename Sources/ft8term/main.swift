@@ -132,7 +132,7 @@ final class App {
     private func apply(_ r: SlotResult) {
         // Ignore captured audio while transmitting — it's the rig's TX monitor,
         // not real receive, so it would show phantom decodes/waterfall.
-        guard !tuning else { return }
+        guard !tuning, !sending else { return }
         slotCount += 1
         spectrum = r.spectrum
         passband = r.passband
@@ -446,10 +446,10 @@ final class App {
         tx?.stop()
         tx = nil
         try? await rig.setPTT(false)
-        liveSource?.resume()            // bring receive audio back
         tuning = false
         rigState.transmitting = false
         render()
+        await resumeCapture()           // settle + retry so receive comes back
     }
 
     /// Poll the rig's TX meters a few times a second while tuning.
@@ -468,6 +468,20 @@ final class App {
     private func setLevelDb(_ db: Float) {
         txLevelDb = max(-60, min(0, db))
         tx?.amplitude = Self.amplitude(fromDb: txLevelDb)
+        render()
+    }
+
+    /// Bring receive capture back after a transmit. The TX AUHAL output may not
+    /// have released the rig's codec the instant we stop it, so `resume()` can
+    /// fail transiently — settle briefly and retry rather than silently leaving
+    /// RX dead (which looked like "no decodes after transmitting").
+    private func resumeCapture() async {
+        guard let live = liveSource else { return }
+        for _ in 0..<8 {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if live.resume() { return }
+        }
+        notice = "receive didn't resume — toggle [T]une or restart if decodes stop"
         render()
     }
 
@@ -573,10 +587,10 @@ final class App {
         }
         out.stop()
         try? await rig.setPTT(false)
-        liveSource?.resume()
         sending = false
         rigState.transmitting = false
         render()
+        await resumeCapture()            // settle + retry so RX reliably comes back
     }
 
     /// Find the clean drive level by sweeping and reading the POWER curve: below

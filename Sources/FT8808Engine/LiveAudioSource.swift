@@ -116,13 +116,25 @@ public final class LiveAudioSource: AudioSource, @unchecked Sendable {
     /// TX engine reconfigured the shared codec, leaving the old engine in a state
     /// that asserts (an AVFoundation trap that `try?` can't catch). The slot
     /// accumulator continues; a straddling partial slot is dropped automatically.
-    public func resume() {
-        guard yieldSlot != nil, !engine.isRunning else { return }
+    ///
+    /// Returns `true` once capture is running again. May fail transiently if the
+    /// TX AUHAL output hasn't released the codec yet — callers should settle
+    /// briefly and retry (see `App.resumeCapture`). `true` if already running.
+    @discardableResult
+    public func resume() -> Bool {
+        guard yieldSlot != nil else { return false }
+        if engine.isRunning { return true }
         engine = AVAudioEngine()
         if let q = deviceQuery, let dev = AudioDevices.find(q) {
             try? setInputDevice(dev.id)
         }
-        try? configureAndStart()
+        do {
+            try configureAndStart()
+            return true
+        } catch {
+            lastError = error
+            return false
+        }
     }
 
     private func stop() {
