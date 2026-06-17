@@ -81,6 +81,7 @@ final class App {
     private var txTask: Task<Void, Never>?    // slot-aligned scheduler loop
     private var sending = false               // a waveform is on the air right now
     private var selectedIndex: Int?           // selected decode in the activity log
+    private var bandTop = 0                    // top visible band row (frozen while selecting)
 
     // Settings panel.
     private enum Mode { case receive, settings }
@@ -665,7 +666,7 @@ final class App {
         if let cur = selectedIndex, let pos = idxs.firstIndex(of: cur) {
             selectedIndex = idxs[max(0, min(idxs.count - 1, pos + delta))]
         } else {
-            selectedIndex = delta < 0 ? idxs.last : idxs.first   // ↑ newest, ↓ oldest
+            selectedIndex = idxs.last   // first press selects the newest (bottom of view)
         }
         render()
     }
@@ -890,16 +891,20 @@ final class App {
         out += Terminal.dim + cell(" dB   dt  freq  Band — entire passband", colW)
             + " │ " + cell("Rx \(Int(rxFreq)) Hz ±\(Int(tol))", colW) + Terminal.reset + "\r\n"
 
-        // Band column (left): newest decodes, but anchored to keep a selection
-        // visible as new decodes arrive.
+        // Band column (left): when nothing is selected, follow the newest
+        // decodes. While selecting, FREEZE the window (so neither arrow presses
+        // nor newly-arriving decodes shift the column) and scroll only when the
+        // cursor would leave the view. `bandTop` persists across renders.
         let bandAll = activity.enumerated().filter { $0.element.message != nil }
-        let band: [(offset: Int, element: ActivityLine)]
+        let n = bandAll.count
         if let sel = selectedIndex, let pos = bandAll.firstIndex(where: { $0.offset == sel }) {
-            let end = min(bandAll.count, pos + 2)        // 1 line of context below
-            band = Array(bandAll[max(0, end - height)..<end])
+            if pos < bandTop { bandTop = pos }                         // cursor above window
+            else if pos >= bandTop + height { bandTop = pos - height + 1 } // below window
+            bandTop = max(0, min(bandTop, max(0, n - height)))
         } else {
-            band = Array(bandAll.suffix(height))
+            bandTop = max(0, n - height)                              // follow newest
         }
+        let band = Array(bandAll[bandTop..<min(n, bandTop + height)])
         let bandPad = height - band.count
 
         // Right column: Rx-frequency decodes on top, QSO state panel on the
