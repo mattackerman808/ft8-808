@@ -21,6 +21,10 @@ swift run ft8term --list-audio|--list-serial|--list-rigs
   `Scripts/build-hamlib.sh`. End users never run `brew install`.
 - `swift run` from the repo root. If a build complains about `Info.plist`, you've `cd`'d
   into a vendor subdir — go back to the root.
+- **Releases:** push a `v*` tag → `.github/workflows/release.yml` ships a universal,
+  signed, notarized, stapled `.pkg`. See `docs/releasing.md`. Note: the universal build
+  is per-arch + `lipo` (a simultaneous `--arch arm64 --arch x86_64` build can't resolve
+  the Hamlib xcframework's library search path under SwiftPM).
 
 ## Layout (headless engine + thin clients)
 
