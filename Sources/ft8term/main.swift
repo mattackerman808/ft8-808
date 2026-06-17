@@ -685,7 +685,7 @@ final class App {
             : "\(Terminal.bold)\(dx)\(Terminal.reset)\(q.dxGrid.map { " \(Terminal.dim)\($0)\(Terminal.reset)" } ?? "")"
         let state = preview
             ? "\(Terminal.dim)⏎ to answer\(Terminal.reset)"
-            : (sending ? "\(Terminal.fg256(196))● ON AIR\(Terminal.reset)"
+            : (sending ? "\(Terminal.fg256(196))●\(Terminal.reset) \(meterText())"
                        : "\(Terminal.fg256(208))○ armed\(Terminal.reset)")
         var lines = [" \(Terminal.fg256(45))\(preview ? "LOAD" : "QSO")\(Terminal.reset)  "
             + "DX \(dxInfo)  \(Terminal.dim)\(txParity == .even ? "even" : "odd") slot\(Terminal.reset)  \(state)"]
@@ -773,6 +773,7 @@ final class App {
         sending = true
         rigState.transmitting = true
         activity.append(ActivityLine(text: " \(Terminal.fg256(196))Tx\(Terminal.reset)        \(text)", cq: false, mine: true))
+        startMeterPoll()                 // live PWR / ALC / SWR off the rig over CAT
         render()
 
         // Wait out the slot; bail early if TX is disabled mid-transmission.
@@ -781,6 +782,8 @@ final class App {
         }
         out.stop()
         try? await rig.setPTT(false)
+        meterTask?.cancel(); meterTask = nil
+        lastMeters = nil
         sending = false
         rigState.transmitting = false
         if closing && txEnabled { completeQSO() }   // sent our final → log + stop
@@ -1002,6 +1005,11 @@ final class App {
                 + "\(Terminal.dim)(amp \(String(format: "%.3f", amp)))\(Terminal.reset)  "
                 + meterText()
                 + "  \(Terminal.dim)[+/-] [A]uto [T]stop\(Terminal.reset)"
+        } else if sending {
+            // On-air: show the message + live rig meters (PWR / ALC / SWR).
+            out += " \(Terminal.fg256(196))● ON AIR\(Terminal.reset)  "
+                + "\(Terminal.fg256(45))\(qso?.message() ?? "")\(Terminal.reset)  "
+                + meterText()
         } else if let notice, let at = noticeSetAt, Date().timeIntervalSince(at) < 8 {
             out += " \(Terminal.fg256(208))\(notice)\(Terminal.reset)"
         } else {
