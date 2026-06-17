@@ -37,6 +37,7 @@ struct ActivityLine {
     let cq: Bool                  // highlight CQ calls
     var message: FT8Message? = nil    // structured decode (nil for notes / TX echo)
     var parity: SlotParity? = nil     // slot we heard it in (for opposite-slot reply)
+    var mine: Bool = false            // involves my call (QSO column) or my own TX
 }
 
 @MainActor
@@ -166,16 +167,20 @@ final class App {
         }
 
         let parity = r.startTime.map { SlotClock.parity(at: $0) }
+        let myCall = config.callsign.uppercased()
         for m in r.messages.sorted(by: { $0.score > $1.score }) {
             let snr = String(format: "%+4.0f", m.snrDb)
             let dt = String(format: "%+4.1f", m.timeSeconds)
             let freq = String(format: "%4.0f", m.frequencyHz)
+            // "Mine" = directed to me, or from the station I'm working.
+            let p = QSOMessages.parse(m.text)
+            let mine = !myCall.isEmpty &&
+                (p?.toCall == myCall || (qso?.dxCall.isEmpty == false && p?.deCall == qso!.dxCall))
             activity.append(ActivityLine(text: " \(snr) \(dt) \(freq)  \(m.text)",
                                          cq: m.text.hasPrefix("CQ"),
-                                         message: m, parity: parity))
+                                         message: m, parity: parity, mine: mine))
             // Advance an in-progress QSO when the DX replies to us.
-            if qso != nil, let p = QSOMessages.parse(m.text),
-               qso!.receive(p, snr: Int(m.snrDb.rounded())) {
+            if qso != nil, let p, qso!.receive(p, snr: Int(m.snrDb.rounded())) {
                 if qso!.isComplete { completeQSO() }
             }
         }
@@ -588,7 +593,7 @@ final class App {
             let rcvd = q.reportReceived.map { QSOMessages.formatReport($0) } ?? "—"
             activity.append(ActivityLine(text: " \(Terminal.fg256(46))✓ QSO  \(q.dxCall)"
                 + "  sent \(QSOMessages.formatReport(q.reportToSend))  rcvd \(rcvd)\(Terminal.reset)",
-                cq: false))
+                cq: false, mine: true))
         }
         disableTx()
         qso = nil
@@ -661,7 +666,7 @@ final class App {
         }
         sending = true
         rigState.transmitting = true
-        activity.append(ActivityLine(text: " \(Terminal.fg256(196))Tx\(Terminal.reset)        \(text)", cq: false))
+        activity.append(ActivityLine(text: " \(Terminal.fg256(196))Tx\(Terminal.reset)        \(text)", cq: false, mine: true))
         render()
 
         // Wait out the slot; bail early if TX is disabled mid-transmission.
@@ -800,19 +805,27 @@ final class App {
         out += renderTxCursor(width: width) + "\r\n"
         out += rule(width)
 
-        // Band-activity header + log.
-        out += Terminal.dim + "  dB   dt   freq  message" + Terminal.reset + "\r\n"
-        let headerRows = 5 // status, cycle bar, rules
+        // Two columns: entire band (left) | my QSO traffic (right).
+        let headerRows = 6 // status, cycle bar, rules, column header
         let spectrumRows = 9 // 8 spectrum + TX cursor row
         let footerRows = 2
-        let logCapacity = max(3, rows - (headerRows + spectrumRows + footerRows + 2))
-        let shown = activity.suffix(logCapacity)
-        let startIdx = activity.count - shown.count
-        for (offset, line) in shown.enumerated() {
-            out += format(line, selected: startIdx + offset == selectedIndex) + "\r\n"
+        let height = max(3, rows - (headerRows + spectrumRows + footerRows + 1))
+        let colW = max(18, (width - 3) / 2)
+
+        out += Terminal.dim + cell(" dB   dt  freq  Band — entire passband", colW)
+            + " │ " + cell("My QSO", colW) + Terminal.reset + "\r\n"
+
+        let band = Array(activity.enumerated().filter { $0.element.message != nil }.suffix(height))
+        let mine = Array(activity.filter { $0.mine }.suffix(height))
+        let bandPad = height - band.count
+        let minePad = height - mine.count
+        for row in 0..<height {
+            let bi = row - bandPad
+            let left = bi >= 0 ? format(band[bi].element, selected: band[bi].offset == selectedIndex) : ""
+            let qi = row - minePad
+            let right = qi >= 0 ? format(mine[qi]) : ""
+            out += cell(left, colW) + "\(Terminal.dim) │ \(Terminal.reset)" + cell(right, colW) + "\r\n"
         }
-        // Pad to push footer down.
-        for _ in 0..<max(0, logCapacity - shown.count) { out += "\r\n" }
 
         // Footer.
         out += rule(width)
@@ -855,6 +868,30 @@ final class App {
         }
 
         commit(out)
+    }
+
+    /// Fixed-width terminal cell: clip `s` to `width` VISIBLE columns (skipping
+    /// ANSI escapes so colors don't count toward the width), close any open
+    /// color, and pad with spaces to exactly `width`.
+    private func cell(_ s: String, _ width: Int) -> String {
+        var out = "", visible = 0
+        var i = s.startIndex
+        while i < s.endIndex && visible < width {
+            let c = s[i]
+            if c == "\u{1B}" {                       // copy the whole escape seq
+                out.append(c)
+                i = s.index(after: i)
+                while i < s.endIndex {
+                    let cj = s[i]; out.append(cj); i = s.index(after: i)
+                    if cj.isLetter { break }
+                }
+            } else {
+                out.append(c); visible += 1; i = s.index(after: i)
+            }
+        }
+        out += Terminal.reset
+        if visible < width { out += String(repeating: " ", count: width - visible) }
+        return out
     }
 
     private func format(_ line: ActivityLine, selected: Bool = false) -> String {
