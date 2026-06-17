@@ -693,9 +693,13 @@ final class App {
     private func transmitCurrentSlot() async {
         guard txEnabled, !tuning, !sending else { return }
         // Grace: let this slot's decode advance the QSO before we pick the text.
-        try? await Task.sleep(nanoseconds: 1_300_000_000)
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
         guard txEnabled, !tuning, !sending, !Task.isCancelled,
               let text = qso?.message() else { return }
+        // Closing message (RR73 or 73): this is the last thing we send — log the
+        // QSO and stop after it goes out, rather than waiting forever for a final
+        // confirmation the DX often doesn't send.
+        let closing = qso?.phase == .rr73 || qso?.phase == .seventyThree
         let sr = 48_000
         let body: [Float]
         do {
@@ -736,6 +740,7 @@ final class App {
         try? await rig.setPTT(false)
         sending = false
         rigState.transmitting = false
+        if closing && txEnabled { completeQSO() }   // sent our final → log + stop
         render()
     }
 
@@ -855,6 +860,13 @@ final class App {
         out += Terminal.dim + " \(utc)  " + Terminal.reset
         out += rigLine + "  \(station)\r\n"
 
+        // Key hints (kept at the top so they never collide with the status bar).
+        out += " \(Terminal.bold)[Q]\(Terminal.reset)uit  \(Terminal.bold)[C]\(Terminal.reset)Q  "
+            + "\(Terminal.dim)↑↓/jk\(Terminal.reset) pick  \(Terminal.dim)⏎\(Terminal.reset) answer  "
+            + "\(Terminal.dim)esc\(Terminal.reset) clear  \(Terminal.bold)[E]\(Terminal.reset) TX  "
+            + "\(Terminal.bold)[O]\(Terminal.reset) slot  \(Terminal.bold)[T]\(Terminal.reset)une  "
+            + "\(Terminal.bold)[F]\(Terminal.reset)ind  \(Terminal.bold)[S]\(Terminal.reset)et\r\n"
+
         // FT8 15 s cycle progress bar.
         out += renderCycleBar(width: width) + "\r\n"
         out += rule(width)
@@ -864,16 +876,13 @@ final class App {
         out += renderTxCursor(width: width) + "\r\n"
         out += rule(width)
 
-        // Two columns: entire band (left) | the Rx frequency (right). The right
-        // pane filters to decodes within ±tol of the Rx/Tx audio frequency
-        // (WSJT-X's "Rx Frequency" window), plus my own Tx and to-me traffic so
-        // a QSO partner who drifts a few Hz is never lost.
-        let headerRows = 6 // status, cycle bar, rules, column header
-        let spectrumRows = 9 // 8 spectrum + TX cursor row
-        let footerRows = 2
-        let panel = qsoPanel(width: width)
-        let panelRows = panel.isEmpty ? 0 : panel.count + 1   // +1 separator rule
-        let height = max(3, rows - (headerRows + spectrumRows + footerRows + 1 + panelRows))
+        // Two columns: entire band (left, full height) | Rx frequency over the
+        // QSO state panel (right). The right pane filters to decodes within ±tol
+        // of the Rx/Tx audio frequency (WSJT-X's "Rx Frequency"), plus my own Tx
+        // and to-me traffic; the state machine sits beneath it (WSJT-X layout).
+        // Chrome rows: status, hints, cycle, rule, 8 spectrum, cursor, rule,
+        // column header, footer rule, footer = 17.
+        let height = max(3, rows - 17)
         let colW = max(18, (width - 3) / 2)
         let rxFreq = txOffsetHz
         let tol = Self.rxFilterTolHz
@@ -881,8 +890,8 @@ final class App {
         out += Terminal.dim + cell(" dB   dt  freq  Band — entire passband", colW)
             + " │ " + cell("Rx \(Int(rxFreq)) Hz ±\(Int(tol))", colW) + Terminal.reset + "\r\n"
 
-        // Band column: normally the newest decodes, but when a line is selected
-        // anchor the window so the selection stays visible as new decodes arrive.
+        // Band column (left): newest decodes, but anchored to keep a selection
+        // visible as new decodes arrive.
         let bandAll = activity.enumerated().filter { $0.element.message != nil }
         let band: [(offset: Int, element: ActivityLine)]
         if let sel = selectedIndex, let pos = bandAll.firstIndex(where: { $0.offset == sel }) {
@@ -891,36 +900,46 @@ final class App {
         } else {
             band = Array(bandAll.suffix(height))
         }
+        let bandPad = height - band.count
+
+        // Right column: Rx-frequency decodes on top, QSO state panel on the
+        // bottom (separated by a thin rule).
+        let panel = qsoPanel(width: colW)
+        let rxTopRows = panel.isEmpty ? height : max(1, height - panel.count - 1)
         let atRx = Array(activity.filter { line in
             if line.mine { return true }
             if let m = line.message { return abs(m.frequencyHz - rxFreq) <= tol }
             return false
-        }.suffix(height))
-        let bandPad = height - band.count
-        let rxPad = height - atRx.count
+        }.suffix(rxTopRows))
+        let rxPad = rxTopRows - atRx.count
+
         for row in 0..<height {
+            // Left cell.
             let bi = row - bandPad
             var left = "", leftHi = false
             if bi >= 0 {
                 leftHi = band[bi].offset == selectedIndex
                 left = leftHi ? band[bi].element.text : format(band[bi].element)
             }
-            let qi = row - rxPad
-            let right = qi >= 0 ? format(atRx[qi]) : ""
+            // Right cell: decodes, then a separator, then the panel.
+            var right = ""
+            if row < rxTopRows {
+                let qi = row - rxPad
+                right = qi >= 0 ? format(atRx[qi]) : ""
+            } else if row == rxTopRows && !panel.isEmpty {
+                right = Terminal.dim + String(repeating: "─", count: colW) + Terminal.reset
+            } else if !panel.isEmpty {
+                let pi = row - rxTopRows - 1
+                if pi < panel.count { right = panel[pi] }
+            }
             out += cell(left, colW, highlight: leftHi)
                 + "\(Terminal.dim) │ \(Terminal.reset)" + cell(right, colW) + "\r\n"
         }
 
-        // QSO state panel (active QSO or selected-decode preview).
-        if !panel.isEmpty {
-            out += rule(width)
-            for l in panel { out += l + "\r\n" }
-        }
-
-        // Footer.
+        // Footer: tune banner, transient notice, or live status (no key hints —
+        // those now live at the top).
         out += rule(width)
         if tuning {
-            // Prominent TX banner: drive level (dB) + live rig meters.
             let amp = Self.amplitude(fromDb: txLevelDb)
             let label = autoTuning
                 ? "\(Terminal.fg256(45))⟳ AUTO-TUNE\(Terminal.reset)"
@@ -931,30 +950,13 @@ final class App {
                 + "\(Terminal.dim)(amp \(String(format: "%.3f", amp)))\(Terminal.reset)  "
                 + meterText()
                 + "  \(Terminal.dim)[+/-] [A]uto [T]stop\(Terminal.reset)"
-        } else if txEnabled {
-            // Prominent TX banner: on-air state, slot, DX, and the queued message.
-            let onAir = sending
-                ? "\(Terminal.fg256(196))● ON AIR\(Terminal.reset)"
-                : "\(Terminal.fg256(208))○ TX armed\(Terminal.reset)"
-            let par = txParity == .even ? "even" : "odd"
-            let dx = (qso?.dxCall.isEmpty == false) ? "\(Terminal.dim)→\(Terminal.reset)\(qso!.dxCall) " : ""
-            out += " \(Terminal.bold)\(onAir)\(Terminal.reset)  "
-                + "\(Terminal.dim)\(par)\(Terminal.reset)  \(dx)"
-                + "\(Terminal.fg256(45))\(qso?.message() ?? "")\(Terminal.reset)  "
-                + "\(Terminal.dim)[E]stop [O]slot\(Terminal.reset)"
         } else if let notice, let at = noticeSetAt, Date().timeIntervalSince(at) < 8 {
-            // Show a transient notice (tune result, errors…) then revert to hints.
             out += " \(Terminal.fg256(208))\(notice)\(Terminal.reset)"
         } else {
             let status = finished
                 ? "\(Terminal.fg256(244))done — \(activity.count) decode(s) over \(slotCount) slot(s)\(Terminal.reset)"
                 : "\(Terminal.dim)decoding…\(Terminal.reset)"
-            out += " \(Terminal.bold)[Q]\(Terminal.reset)uit \(Terminal.bold)[C]\(Terminal.reset)Q "
-                + "\(Terminal.dim)↑↓\(Terminal.reset)pick \(Terminal.dim)⏎\(Terminal.reset)answer "
-                + "\(Terminal.bold)[E]\(Terminal.reset)TX \(Terminal.bold)[O]\(Terminal.reset)slot "
-                + "\(Terminal.bold)[T]\(Terminal.reset)une \(Terminal.bold)[F]\(Terminal.reset)ind "
-                + "\(Terminal.bold)[S]\(Terminal.reset)et  "
-                + "\(Terminal.dim)\(sourceLabel)\(Terminal.reset)  \(status)"
+            out += " \(Terminal.dim)\(sourceLabel)\(Terminal.reset)  \(status)"
         }
 
         commit(out)
@@ -988,8 +990,15 @@ final class App {
     private func format(_ line: ActivityLine, selected: Bool = false) -> String {
         let color = line.cq ? Terminal.fg256(220) : Terminal.fg256(252)
         if selected {
-            // Replace the leading space of a decode line with a cursor marker.
             return "\(Terminal.bold)\(Terminal.fg256(45))▸\(Terminal.reset)\(color)\(line.text.dropFirst())\(Terminal.reset)"
+        }
+        // Decodes get a left-edge slot-parity marker (even=blue, odd=orange) so
+        // the alternating even/odd sequence is visible down the band column. The
+        // marker replaces the line's leading space, keeping column alignment.
+        if let p = line.parity {
+            let mark = p == .even ? "\(Terminal.fg256(33))▎\(Terminal.reset)"
+                                  : "\(Terminal.fg256(208))▎\(Terminal.reset)"
+            return "\(mark)\(color)\(line.text.dropFirst())\(Terminal.reset)"
         }
         return "\(color)\(line.text)\(Terminal.reset)"
     }
@@ -1187,10 +1196,17 @@ final class App {
         let color = tuning ? Terminal.fg256(196) : Terminal.fg256(46)
         let bar = color + String(repeating: "█", count: filled) + Terminal.reset
                 + Terminal.dim + String(repeating: "·", count: barWidth - filled) + Terminal.reset
-        let label = tuning ? "TX" : "RX"
+        // Current slot parity (even = :00/:30, odd = :15/:45), colour-matched to
+        // the band-activity markers, plus our TX sequence when armed.
+        let cur = SlotClock.parity(at: Date())
+        let slotCol = cur == .even ? Terminal.fg256(33) : Terminal.fg256(208)
+        let slotTxt = "\(slotCol)\(cur == .even ? "even" : "odd")\(Terminal.reset)"
+        let txInfo = txEnabled
+            ? "  \(Terminal.fg256(196))TX \(txParity == .even ? "even" : "odd")\(Terminal.reset)"
+            : ""
         return " \(Terminal.dim)cycle\(Terminal.reset) \(bar) "
              + String(format: "%04.1f", sec) + "\(Terminal.dim)/15s\(Terminal.reset)  "
-             + "\(color)\(label)\(Terminal.reset)"
+             + "\(Terminal.dim)slot\(Terminal.reset) \(slotTxt)\(txInfo)"
     }
 }
 
