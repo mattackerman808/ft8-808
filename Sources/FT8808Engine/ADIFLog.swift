@@ -49,6 +49,29 @@ public enum ADIFLog {
         }
     }
 
+    /// The set of callsigns already worked, read from an ADIF file's CALL
+    /// fields (case-insensitive field name; values upper-cased). Empty if the
+    /// file is missing — used to flag "worked before" decodes.
+    public static func workedCalls(from url: URL = defaultURL()) -> Set<String> {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        var result = Set<String>()
+        var idx = text.startIndex
+        while let r = text.range(of: "<call:", options: .caseInsensitive, range: idx..<text.endIndex) {
+            var i = r.upperBound
+            var lenStr = ""
+            while i < text.endIndex, text[i].isNumber { lenStr.append(text[i]); i = text.index(after: i) }
+            while i < text.endIndex, text[i] != ">" { i = text.index(after: i) }   // skip optional :TYPE
+            guard i < text.endIndex, let len = Int(lenStr) else { idx = r.upperBound; continue }
+            let valStart = text.index(after: i)                                    // after '>'
+            guard let valEnd = text.index(valStart, offsetBy: len, limitedBy: text.endIndex) else {
+                idx = r.upperBound; continue
+            }
+            result.insert(String(text[valStart..<valEnd]).uppercased())
+            idx = valEnd
+        }
+        return result
+    }
+
     public static func header() -> String {
         "FT8-808 ADIF export\n<ADIF_VER:5>3.1.4\n<PROGRAMID:7>FT8-808\n<EOH>\n"
     }

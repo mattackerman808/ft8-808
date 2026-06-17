@@ -38,6 +38,8 @@ struct ActivityLine {
     var message: FT8Message? = nil    // structured decode (nil for notes / TX echo)
     var parity: SlotParity? = nil     // slot we heard it in (for opposite-slot reply)
     var mine: Bool = false            // involves my call (QSO column) or my own TX
+    var toMe: Bool = false            // my call appears in the message (highlight green)
+    var deCall: String? = nil         // sender callsign (for worked-before check)
 }
 
 @MainActor
@@ -82,6 +84,7 @@ final class App {
     private var sending = false               // a waveform is on the air right now
     private var selectedIndex: Int?           // selected decode in the activity log
     private var bandTop = 0                    // top visible band row (frozen while selecting)
+    private var workedCalls: Set<String> = []  // calls already in the ADIF log (worked-before)
 
     // Settings panel.
     private enum Mode { case receive, settings }
@@ -121,6 +124,7 @@ final class App {
     private var clockTask: Task<Void, Never>?
 
     func run() async {
+        workedCalls = ADIFLog.workedCalls()
         rigState = await rig.state()
         if let pendingNotice { notice = pendingNotice }
         if interactive { startKeyReader(); startRigPoll(); startClock() }
@@ -178,11 +182,12 @@ final class App {
             let freq = String(format: "%4.0f", m.frequencyHz)
             // "Mine" = directed to me, or from the station I'm working.
             let p = QSOMessages.parse(m.text)
-            let mine = !myCall.isEmpty &&
-                (p?.toCall == myCall || (qso?.dxCall.isEmpty == false && p?.deCall == qso!.dxCall))
+            let toMe = !myCall.isEmpty && (p?.toCall == myCall || p?.deCall == myCall)
+            let mine = toMe || (qso?.dxCall.isEmpty == false && p?.deCall == qso!.dxCall)
             activity.append(ActivityLine(text: " \(snr) \(dt) \(freq)  \(m.text)",
                                          cq: m.text.hasPrefix("CQ"),
-                                         message: m, parity: parity, mine: mine))
+                                         message: m, parity: parity, mine: mine,
+                                         toMe: toMe, deCall: p?.deCall))
             // Advance an in-progress QSO when the DX replies to us.
             if qso != nil, let p, qso!.receive(p, snr: Int(m.snrDb.rounded())) {
                 if qso!.isComplete { completeQSO() }
@@ -630,6 +635,7 @@ final class App {
             myGrid: config.grid)
         do {
             let url = try ADIFLog.append(rec)
+            workedCalls.insert(q.dxCall.uppercased())
             notice = "✓ logged \(q.dxCall) → \(url.lastPathComponent)"
         } catch {
             notice = "QSO done but ADIF log failed: \(error.localizedDescription)"
@@ -1034,7 +1040,12 @@ final class App {
     }
 
     private func format(_ line: ActivityLine, selected: Bool = false) -> String {
-        let color = line.cq ? Terminal.fg256(220) : Terminal.fg256(252)
+        // Colour priority: my call (green) > worked-before (red) > CQ (yellow) > normal.
+        let color: String
+        if line.toMe { color = Terminal.fg256(46) }
+        else if let dc = line.deCall, workedCalls.contains(dc) { color = Terminal.fg256(196) }
+        else if line.cq { color = Terminal.fg256(220) }
+        else { color = Terminal.fg256(252) }
         if selected {
             return "\(Terminal.bold)\(Terminal.fg256(45))▸\(Terminal.reset)\(color)\(line.text.dropFirst())\(Terminal.reset)"
         }

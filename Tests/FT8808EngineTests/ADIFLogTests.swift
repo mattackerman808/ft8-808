@@ -31,6 +31,28 @@ final class ADIFLogTests: XCTestCase {
         XCTAssertTrue(s.hasSuffix("<EOR>\n"))
     }
 
+    func testWorkedCallsRoundTrip() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ft8worked-\(UUID().uuidString).adi")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let date = Date(timeIntervalSince1970: 1_780_000_000)
+        for call in ["V31DL", "k1abc"] {
+            try ADIFLog.append(ADIFRecord(call: call, dateUTC: date, freqMHz: 14.074,
+                                          mode: "FT8", rstSent: "-10", rstRcvd: "-05",
+                                          myCall: "N6ACK", myGrid: "CM97"), to: tmp)
+        }
+        let worked = ADIFLog.workedCalls(from: tmp)
+        XCTAssertTrue(worked.contains("V31DL"))
+        XCTAssertTrue(worked.contains("K1ABC"))   // upper-cased
+        XCTAssertFalse(worked.contains("W9XYZ"))
+    }
+
+    func testWorkedCallsEmptyWhenMissing() {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nope-\(UUID().uuidString).adi")
+        XCTAssertTrue(ADIFLog.workedCalls(from: missing).isEmpty)
+    }
+
     func testAppendCreatesHeaderThenAppends() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("ft8test-\(UUID().uuidString).adi")
