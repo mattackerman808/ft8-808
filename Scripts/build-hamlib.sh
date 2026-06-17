@@ -71,7 +71,7 @@ for ARCH in ${ARCHS}; do
         --enable-shared --disable-static \
         --without-cxx-binding \
         --without-libusb \
-        "${HOST_FLAG[@]}" \
+        ${HOST_FLAG[@]+"${HOST_FLAG[@]}"} \
         CC="clang -arch ${ARCH}" \
         CFLAGS="-arch ${ARCH} -mmacosx-version-min=${MIN_MACOS} -O2" \
         > configure.log 2>&1 && \
