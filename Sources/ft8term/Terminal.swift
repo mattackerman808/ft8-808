@@ -63,6 +63,7 @@ enum Terminal {
     static let reset = "\u{1b}[0m"
     static let bold = "\u{1b}[1m"
     static let dim = "\u{1b}[2m"
+    static let reverse = "\u{1b}[7m"
     static func fg256(_ n: Int) -> String { "\u{1b}[38;5;\(n)m" }
     static func bg256(_ n: Int) -> String { "\u{1b}[48;5;\(n)m" }
 }

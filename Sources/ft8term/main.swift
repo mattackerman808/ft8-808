@@ -236,7 +236,7 @@ final class App {
                     if poll(&pfd, 1, 40) > 0, (pfd.revents & Int16(POLLIN)) != 0 {
                         var b1: UInt8 = 0
                         if read(STDIN_FILENO, &b1, 1) == 1 {
-                            if b1 == 0x5B {
+                            if b1 == 0x5B || b1 == 0x4F {   // CSI '[' or SS3 'O' (app cursor keys)
                                 var b2: UInt8 = 0
                                 if read(STDIN_FILENO, &b2, 1) == 1 {
                                     let dir = b2
@@ -299,6 +299,8 @@ final class App {
             toggleParity()
         case 13, 10:                       // Enter — answer the selected decode
             answerSelected()
+        case UInt8(ascii: "k"): moveSelection(-1)   // vim-style selection fallback
+        case UInt8(ascii: "j"): moveSelection(1)
         default:
             break
         }
@@ -602,6 +604,49 @@ final class App {
         qso = nil
     }
 
+    /// The QSO to display in the state panel: the live one, or a preview built
+    /// from the currently-selected decode (so you can see what you'd send).
+    private func activeOrPreviewQSO() -> (q: QSOSequencer, preview: Bool)? {
+        if let q = qso { return (q, false) }
+        guard config.isStationSet, let i = selectedIndex, i < activity.count,
+              let m = activity[i].message, let p = QSOMessages.parse(m.text),
+              let dx = p.deCall else { return nil }
+        return (QSOSequencer(answer: dx, dxGrid: p.grid, heardSnr: Int(m.snrDb.rounded()),
+                             myCall: config.callsign, myGrid: config.grid), true)
+    }
+
+    /// WSJT-X-style state panel: DX call/grid + the Tx1–Tx6 sequence with the
+    /// current step highlighted. Returns [] when there's nothing to show.
+    private func qsoPanel(width: Int) -> [String] {
+        guard let (q, preview) = activeOrPreviewQSO() else { return [] }
+        let mc = q.myCall, mg = q.myGrid, dx = q.dxCall, r = q.reportToSend
+        let rows: [(String, String, QSOSequencer.Phase)] = [
+            ("Tx1", dx.isEmpty ? "" : QSOMessages.reply(dx: dx, myCall: mc, myGrid: mg), .reply),
+            ("Tx2", dx.isEmpty ? "" : QSOMessages.report(dx: dx, myCall: mc, snr: r), .report),
+            ("Tx3", dx.isEmpty ? "" : QSOMessages.rogerReport(dx: dx, myCall: mc, snr: r), .rReport),
+            ("Tx4", dx.isEmpty ? "" : QSOMessages.roger(dx: dx, myCall: mc), .rr73),
+            ("Tx5", dx.isEmpty ? "" : QSOMessages.seventyThree(dx: dx, myCall: mc), .seventyThree),
+            ("Tx6", QSOMessages.cq(call: mc, grid: mg, directive: config.cqDirective), .cq),
+        ]
+        let dxInfo = dx.isEmpty ? "\(Terminal.dim)(awaiting answer)\(Terminal.reset)"
+            : "\(Terminal.bold)\(dx)\(Terminal.reset)\(q.dxGrid.map { " \(Terminal.dim)\($0)\(Terminal.reset)" } ?? "")"
+        let state = preview
+            ? "\(Terminal.dim)⏎ to answer\(Terminal.reset)"
+            : (sending ? "\(Terminal.fg256(196))● ON AIR\(Terminal.reset)"
+                       : "\(Terminal.fg256(208))○ armed\(Terminal.reset)")
+        var lines = [" \(Terminal.fg256(45))\(preview ? "LOAD" : "QSO")\(Terminal.reset)  "
+            + "DX \(dxInfo)  \(Terminal.dim)\(txParity == .even ? "even" : "odd") slot\(Terminal.reset)  \(state)"]
+        for (label, text, phase) in rows {
+            let cur = phase == q.phase
+            let marker = cur ? "\(Terminal.fg256(45))▸\(Terminal.reset)" : " "
+            let style = cur ? Terminal.bold : Terminal.dim
+            let body = text.isEmpty ? "—" : text
+            let tag = cur ? "  \(Terminal.fg256(preview ? 244 : 196))\(preview ? "next" : "now")\(Terminal.reset)" : ""
+            lines.append("  \(marker) \(style)\(label)  \(body)\(Terminal.reset)\(tag)")
+        }
+        return lines
+    }
+
     /// ↑/↓ — move the decode-selection cursor over message-bearing log lines.
     private func moveSelection(_ delta: Int) {
         let idxs = activity.indices.filter { activity[$0].message != nil }
@@ -815,7 +860,9 @@ final class App {
         let headerRows = 6 // status, cycle bar, rules, column header
         let spectrumRows = 9 // 8 spectrum + TX cursor row
         let footerRows = 2
-        let height = max(3, rows - (headerRows + spectrumRows + footerRows + 1))
+        let panel = qsoPanel(width: width)
+        let panelRows = panel.isEmpty ? 0 : panel.count + 1   // +1 separator rule
+        let height = max(3, rows - (headerRows + spectrumRows + footerRows + 1 + panelRows))
         let colW = max(18, (width - 3) / 2)
         let rxFreq = txOffsetHz
         let tol = Self.rxFilterTolHz
@@ -833,10 +880,21 @@ final class App {
         let rxPad = height - atRx.count
         for row in 0..<height {
             let bi = row - bandPad
-            let left = bi >= 0 ? format(band[bi].element, selected: band[bi].offset == selectedIndex) : ""
+            var left = "", leftHi = false
+            if bi >= 0 {
+                leftHi = band[bi].offset == selectedIndex
+                left = leftHi ? band[bi].element.text : format(band[bi].element)
+            }
             let qi = row - rxPad
             let right = qi >= 0 ? format(atRx[qi]) : ""
-            out += cell(left, colW) + "\(Terminal.dim) │ \(Terminal.reset)" + cell(right, colW) + "\r\n"
+            out += cell(left, colW, highlight: leftHi)
+                + "\(Terminal.dim) │ \(Terminal.reset)" + cell(right, colW) + "\r\n"
+        }
+
+        // QSO state panel (active QSO or selected-decode preview).
+        if !panel.isEmpty {
+            out += rule(width)
+            for l in panel { out += l + "\r\n" }
         }
 
         // Footer.
@@ -885,25 +943,26 @@ final class App {
     /// Fixed-width terminal cell: clip `s` to `width` VISIBLE columns (skipping
     /// ANSI escapes so colors don't count toward the width), close any open
     /// color, and pad with spaces to exactly `width`.
-    private func cell(_ s: String, _ width: Int) -> String {
-        var out = "", visible = 0
+    private func cell(_ s: String, _ width: Int, highlight: Bool = false) -> String {
+        var body = "", visible = 0
         var i = s.startIndex
         while i < s.endIndex && visible < width {
             let c = s[i]
             if c == "\u{1B}" {                       // copy the whole escape seq
-                out.append(c)
+                body.append(c)
                 i = s.index(after: i)
                 while i < s.endIndex {
-                    let cj = s[i]; out.append(cj); i = s.index(after: i)
+                    let cj = s[i]; body.append(cj); i = s.index(after: i)
                     if cj.isLetter { break }
                 }
             } else {
-                out.append(c); visible += 1; i = s.index(after: i)
+                body.append(c); visible += 1; i = s.index(after: i)
             }
         }
-        out += Terminal.reset
-        if visible < width { out += String(repeating: " ", count: width - visible) }
-        return out
+        if visible < width { body += String(repeating: " ", count: width - visible) }
+        // Highlight wraps the full padded width (selected row is plain text).
+        return highlight ? Terminal.reverse + body + Terminal.reset
+                         : body + Terminal.reset
     }
 
     private func format(_ line: ActivityLine, selected: Bool = false) -> String {
