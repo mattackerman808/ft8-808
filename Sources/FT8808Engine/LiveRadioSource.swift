@@ -31,6 +31,7 @@ public final class LiveRadioSource: AudioSource, @unchecked Sendable {
 
     private let lock = NSLock()
     private var capture: AudioCaptureUnit?
+    private var resolvedDeviceID: AudioDeviceID?
     private var accumulator: SlotAccumulator
     private let spectrum: StreamingSpectrum
     private var slotSink: (@Sendable (AudioSlot) -> Void)?
@@ -59,7 +60,9 @@ public final class LiveRadioSource: AudioSource, @unchecked Sendable {
     }
 
     public func slots() -> AsyncStream<AudioSlot> {
-        AsyncStream { continuation in
+        // Generous bound (slots are 15 s apart) so a stalled decoder can't grow
+        // the buffer without limit overnight.
+        AsyncStream(AudioSlot.self, bufferingPolicy: .bufferingNewest(8)) { continuation in
             Task {
                 self.lock.withLock { self.slotSink = { continuation.yield($0) } }
                 do { try await self.ensureStarted() }
@@ -72,7 +75,10 @@ public final class LiveRadioSource: AudioSource, @unchecked Sendable {
     }
 
     public func frames() -> AsyncStream<SpectrumFrame> {
-        AsyncStream { continuation in
+        // Bound the buffer and drop stale frames: a real-time waterfall only ever
+        // wants the newest. Unbounded buffering let frames pile up without limit
+        // whenever the consumer fell behind, growing memory + latency over time.
+        AsyncStream(SpectrumFrame.self, bufferingPolicy: .bufferingNewest(2)) { continuation in
             Task {
                 self.lock.withLock { self.frameSink = { continuation.yield($0) } }
                 do { try await self.ensureStarted() }
@@ -108,12 +114,32 @@ public final class LiveRadioSource: AudioSource, @unchecked Sendable {
         // slots()/frames() callers open exactly one capture unit.
         try lock.withLock {
             if started { return }
+            resolvedDeviceID = deviceID
             let cap = AudioCaptureUnit(deviceID: deviceID, sampleRate: targetRate) { [weak self] samples in
                 self?.process(samples)
             }
             do { try cap.start() } catch { throw LiveError.captureFailed("\(error)") }
             capture = cap
             started = true
+        }
+    }
+
+    /// Release the input device (e.g. before keying for tune). Streams stay open;
+    /// `resume()` reopens capture. Per CLAUDE.md, do this only for tune, not for
+    /// every message-TX.
+    public func suspend() {
+        lock.withLock { capture?.stop(); capture = nil }
+    }
+
+    @discardableResult
+    public func resume() -> Bool {
+        lock.withLock {
+            guard started, capture == nil else { return started }
+            let cap = AudioCaptureUnit(deviceID: resolvedDeviceID, sampleRate: targetRate) { [weak self] samples in
+                self?.process(samples)
+            }
+            do { try cap.start(); capture = cap; return true }
+            catch { lastError = error; return false }
         }
     }
 

@@ -56,7 +56,9 @@ public final class LiveSpectrumSource: @unchecked Sendable {
     }
 
     public func frames() -> AsyncStream<SpectrumFrame> {
-        AsyncStream { continuation in
+        // Drop stale frames if the consumer falls behind (a waterfall wants the
+        // newest); unbounded buffering would grow without limit over time.
+        AsyncStream(SpectrumFrame.self, bufferingPolicy: .bufferingNewest(2)) { continuation in
             Task {
                 do {
                     try await self.start { continuation.yield($0) }

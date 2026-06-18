@@ -79,6 +79,7 @@ final class WaterfallRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var rowsPerSecond: Double = 47
 
     var mode: WaterfallMode = .threeD
+    var txFraction: Float = 0.5            // TX offset across the band [0,1], for the 3D marker
     private var aspect: Float = 16.0 / 9.0
 
     override init() {
@@ -305,6 +306,7 @@ final class WaterfallRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount,
                                           indexType: .uint32, indexBuffer: indexBuffer,
                                           indexBufferOffset: 0)
+                drawTxMarker(enc)
             case .twoD:
                 enc.setRenderPipelineState(pipeline2D)
                 enc.setFragmentBytes(&u, length: MemoryLayout<WFUniforms>.stride, index: 0)
@@ -377,6 +379,94 @@ final class WaterfallRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             enc.setFragmentTexture(label.texture, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
+    }
+
+    /// Bright pink TX-frequency marker down the surface (front→back) at the TX
+    /// column. Drawn as a thick quad (Metal can't widen lines) on top, so it's
+    /// clearly visible against the terrain.
+    private func drawTxMarker(_ enc: MTLRenderCommandEncoder) {
+        guard drawablePx.x > 0, drawablePx.y > 0 else { return }
+        let wx = (txFraction - 0.5) * xExtent
+        let a4 = lastMVP * SIMD4<Float>(wx, 0.02, 0.05, 1)
+        let b4 = lastMVP * SIMD4<Float>(wx, 0.02, -zDepth, 1)
+        guard a4.w > 0.02, b4.w > 0.02 else { return }
+
+        // Work in pixels so the width is uniform, then back to NDC.
+        func toPx(_ c: SIMD4<Float>) -> SIMD2<Float> {
+            SIMD2((c.x / c.w + 1) * 0.5 * drawablePx.x, (c.y / c.w + 1) * 0.5 * drawablePx.y)
+        }
+        func toNDC(_ p: SIMD2<Float>) -> SIMD2<Float> {
+            SIMD2(p.x / drawablePx.x * 2 - 1, p.y / drawablePx.y * 2 - 1)
+        }
+        let aPx = toPx(a4), bPx = toPx(b4)
+        var dir = bPx - aPx
+        let len = max(1e-3, (dir.x * dir.x + dir.y * dir.y).squareRoot())
+        dir /= len
+        let perp = SIMD2<Float>(-dir.y, dir.x) * 3.0   // half-width → ~6 px line
+
+        var verts = [toNDC(aPx + perp), toNDC(aPx - perp), toNDC(bPx + perp), toNDC(bPx - perp)]
+        let al: Float = 0.95
+        var color = SIMD4<Float>(1.0 * al, 0.25 * al, 0.55 * al, al)   // premultiplied pink
+        enc.setRenderPipelineState(linePipeline)
+        enc.setDepthStencilState(overlayDepthState)
+        enc.setVertexBytes(&verts, length: MemoryLayout<SIMD2<Float>>.stride * 4, index: 0)
+        enc.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
+    /// Screen point (view points, top-left origin) of the TX marker's far end,
+    /// for placing the frequency label in 3D. nil if behind the camera.
+    func txMarkerViewPoint(viewSize: CGSize) -> CGPoint? {
+        guard viewSize.width > 0, viewSize.height > 0 else { return nil }
+        let wx = (txFraction - 0.5) * xExtent
+        let c = lastMVP * SIMD4<Float>(wx, 0.02, -zDepth, 1)
+        guard c.w > 0.02 else { return nil }
+        return CGPoint(x: CGFloat((c.x / c.w + 1) / 2) * viewSize.width,
+                       y: CGFloat((1 - c.y / c.w) / 2) * viewSize.height)
+    }
+
+    /// Screen X (view points) where a frequency fraction projects on the surface
+    /// FRONT edge — so the tuning bar's flag/ticks line up with the 3D marker.
+    func frontEdgeViewX(fraction gx: Float, viewWidth: CGFloat) -> CGFloat? {
+        guard viewWidth > 0 else { return nil }
+        let wx = (gx - 0.5) * xExtent
+        let c = lastMVP * SIMD4<Float>(wx, 0.02, 0.05, 1)
+        guard c.w > 0.02 else { return nil }
+        return CGFloat((c.x / c.w + 1) * 0.5) * viewWidth
+    }
+
+    /// Inverse of `frontEdgeViewX` (monotonic → binary search) for bar dragging.
+    func fractionForFrontEdgeViewX(_ x: CGFloat, viewWidth: CGFloat) -> Float {
+        var lo: Float = 0, hi: Float = 1
+        for _ in 0..<24 {
+            let mid = (lo + hi) / 2
+            let mx = frontEdgeViewX(fraction: mid, viewWidth: viewWidth) ?? CGFloat(mid) * viewWidth
+            if mx < x { lo = mid } else { hi = mid }
+        }
+        return (lo + hi) / 2
+    }
+
+    /// Map a point in the view (points, top-left origin) to a frequency fraction
+    /// [0,1] across the band, by casting the click ray through the inverse MVP
+    /// onto the y=0 ground plane. Returns nil if the ray misses the floor.
+    func freqFraction(atViewPoint p: CGPoint, viewSize: CGSize) -> Float? {
+        guard viewSize.width > 0, viewSize.height > 0 else { return nil }
+        let ndcX = Float(2 * p.x / viewSize.width - 1)
+        let ndcY = Float(1 - 2 * p.y / viewSize.height)
+        let inv = lastMVP.inverse
+        func unproject(_ z: Float) -> SIMD3<Float> {
+            let w = inv * SIMD4<Float>(ndcX, ndcY, z, 1)
+            return SIMD3(w.x, w.y, w.z) / w.w
+        }
+        let near = unproject(0), far = unproject(1)
+        let dir = far - near
+        guard abs(dir.y) > 1e-6 else { return nil }
+        let t = -near.y / dir.y
+        guard t > 0 else { return nil }
+        let hit = near + t * dir
+        let gx = hit.x / xExtent + 0.5
+        guard gx >= -0.05, gx <= 1.05 else { return nil }
+        return min(1, max(0, gx))
     }
 
     // MARK: Camera
