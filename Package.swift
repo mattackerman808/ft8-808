@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "ft8decode", targets: ["ft8decode"]),
         .executable(name: "ft8term", targets: ["ft8term"]),
         .executable(name: "ft8rig", targets: ["ft8rig"]),
+        .executable(name: "ft8gui", targets: ["ft8gui"]),
     ],
     targets: [
         // Vendored kgoba/ft8_lib (MIT) plus the FT8-808 C shim.
@@ -84,6 +85,23 @@ let package = Package(
         .executableTarget(
             name: "ft8rig",
             dependencies: ["FT8808Engine", "HamlibRig"]
+        ),
+        // Milestone 5: native SwiftUI macOS app. First cut is a standalone
+        // real-time Metal waterfall over LiveSpectrumSource.
+        .executableTarget(
+            name: "ft8gui",
+            dependencies: ["FT8Codec", "FT8808Engine", "HamlibRig"],
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                // Embed an Info.plist so TCC can show a mic-permission prompt
+                // and the app gets a bundle identity for windowing.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/ft8gui/Info.plist",
+                ]),
+            ]
         ),
         .testTarget(
             name: "FT8CodecTests",

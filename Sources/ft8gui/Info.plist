@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.808.ft8gui</string>
+    <key>CFBundleName</key>
+    <string>FT8-808</string>
+    <key>CFBundleDisplayName</key>
+    <string>FT8-808</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>FT8-808 captures receiver audio from your radio to show a live waterfall and decode FT8 signals.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
