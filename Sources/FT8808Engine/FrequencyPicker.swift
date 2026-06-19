@@ -4,18 +4,20 @@ import Foundation
 /// (FFT magnitudes in `[0, 1]` per bin) spanning the passband.
 ///
 /// "Quietest bin" alone is wrong on two counts: the band edges read empty only
-/// because they're past the SSB filter rolloff (no usable response there), and
-/// operators expect calls near band center. So we restrict to a `usable`
-/// sub-band and score each slice by `energy + centerWeight · distanceFromCenter`,
-/// taking the minimum — i.e. sit as central as possible, moving off only to
-/// avoid an actual signal.
+/// because they're past the SSB filter rolloff (no usable response there), and a
+/// mild bias toward band center is nice. So we restrict to a `usable` sub-band
+/// and score each slice by `energy + centerWeight · distanceFromCenter`, taking
+/// the minimum — pick the clearest slice, with centrality only as a tiebreaker.
+/// `centerWeight` is deliberately small: a genuinely clear slice anywhere in the
+/// usable band must beat a busy one near center (otherwise it parks you on top of
+/// activity at the band's middle).
 public enum FrequencyPicker {
     public static func clearOffset(
         busyMap spec: [Float],
         passband: ClosedRange<Float>,
         usable: ClosedRange<Float>,
         signalWidthHz: Float = 50,
-        centerWeight: Float = 0.6
+        centerWeight: Float = 0.2
     ) -> Float? {
         let cols = spec.count
         guard cols > 4 else { return nil }
@@ -42,8 +44,13 @@ public enum FrequencyPicker {
         var bestStart = -1
         var bestScore = Float.greatestFiniteMagnitude
         for start in 0...(cols - win) {
+            // The WHOLE window must sit inside the usable band — otherwise a slice
+            // near the edge looks falsely clear by averaging in the empty rolloff
+            // just outside it (and would park us on the band edge).
+            let fStart = lo + (Float(start) / Float(cols)) * span
+            let fEnd = lo + (Float(start + win) / Float(cols)) * span
+            guard fStart >= usableLo, fEnd <= usableHi else { continue }
             let f = centerHz(at: start)
-            guard f >= usableLo, f <= usableHi else { continue }
             let energy = (prefix[start + win] - prefix[start]) / Float(win)
             let score = energy + centerWeight * (abs(f - bandCenter) / halfWidth)
             if score < bestScore { bestScore = score; bestStart = start }
