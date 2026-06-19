@@ -62,10 +62,14 @@ struct QSOPanel: View {
     }
 
     /// Always-visible transmit state, so it's clear whether anything will go out.
+    /// "ARMED" means a contact is actually loaded and will transmit; "TX ON" is
+    /// the master enabled but idle (nothing queued).
     private var txChip: some View {
-        let (label, color): (String, Color) =
-            model.sending  ? ("SENDING",  .red) :
-            model.txEnabled ? ("TX ARMED", .red) : ("TX OFF", .secondary)
+        let (label, color): (String, Color)
+        if model.sending          { (label, color) = ("SENDING", .red) }
+        else if !model.txEnabled  { (label, color) = ("TX OFF", .secondary) }
+        else if model.qso != nil  { (label, color) = ("ARMED", .red) }
+        else                      { (label, color) = ("TX ON", .green) }
         return Text(label)
             .font(.system(size: 10, weight: .bold, design: .monospaced))
             .foregroundStyle(color)
