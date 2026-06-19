@@ -33,6 +33,9 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Compile check (host arch — fail fast before the slow universal build)
+        run: swift build -c release --product ft8gui --product ft8term
+
       - name: Resolve version
         id: ver
         run: |
