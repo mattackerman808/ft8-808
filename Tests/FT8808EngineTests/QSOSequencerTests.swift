@@ -52,4 +52,44 @@ final class QSOSequencerTests: XCTestCase {
         XCTAssertFalse(q.receive(parse("N6ACK W9ZZZ -10"), snr: -5))  // from someone else
         XCTAssertEqual(q.phase, .reply)                               // unchanged
     }
+
+    // MARK: Resume mid-QSO (click a station already answering our CQ)
+
+    func testResumeFromGridSendsReport() {
+        let q = QSOSequencer(resuming: parse("N6ACK LW1DRJ GF05"), dxGrid: nil, heardSnr: -7,
+                             myCall: "N6ACK", myGrid: "CM97")
+        XCTAssertEqual(q.dxCall, "LW1DRJ")
+        XCTAssertEqual(q.dxGrid, "GF05")
+        XCTAssertEqual(q.phase, .report)
+        XCTAssertEqual(q.message(), "LW1DRJ N6ACK -07")
+    }
+
+    func testResumeFromReportSendsRogerReport() {
+        let q = QSOSequencer(resuming: parse("N6ACK LW1DRJ -12"), dxGrid: nil, heardSnr: -7,
+                             myCall: "N6ACK", myGrid: "CM97")
+        XCTAssertEqual(q.phase, .rReport)
+        XCTAssertEqual(q.reportReceived, -12)
+        XCTAssertEqual(q.message(), "LW1DRJ N6ACK R-07")
+    }
+
+    func testResumeFromRogerReportSendsRR73() {
+        let q = QSOSequencer(resuming: parse("N6ACK LW1DRJ R-18"), dxGrid: nil, heardSnr: -7,
+                             myCall: "N6ACK", myGrid: "CM97")
+        XCTAssertEqual(q.phase, .rr73)
+        XCTAssertEqual(q.message(), "LW1DRJ N6ACK RR73")
+    }
+
+    func testResumeFromRR73Sends73() {
+        let q = QSOSequencer(resuming: parse("N6ACK LW1DRJ RR73"), dxGrid: nil, heardSnr: -7,
+                             myCall: "N6ACK", myGrid: "CM97")
+        XCTAssertEqual(q.phase, .seventyThree)
+        XCTAssertEqual(q.message(), "LW1DRJ N6ACK 73")
+    }
+
+    func testResumeUsesFallbackGridWhenMessageHasNone() {
+        // A report message carries no grid; the caller supplies one heard earlier.
+        let q = QSOSequencer(resuming: parse("N6ACK LW1DRJ -12"), dxGrid: "GF05", heardSnr: -7,
+                             myCall: "N6ACK", myGrid: "CM97")
+        XCTAssertEqual(q.dxGrid, "GF05")
+    }
 }

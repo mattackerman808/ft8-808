@@ -37,6 +37,30 @@ public struct QSOSequencer: Sendable, Equatable {
         self.directive = nil
     }
 
+    /// Resume an exchange from a message a station just sent *us* — e.g. after we
+    /// called CQ and several stations came back, click one that's already
+    /// answering (grid / report / R-report) and pick up at the correct reply
+    /// instead of Tx1. The phase is set to what WE send next; `dxGrid` supplies a
+    /// grid heard in an earlier decode when this message carries none.
+    public init(resuming p: QSOMessages.Parsed, dxGrid: String?, heardSnr: Int,
+                myCall: String, myGrid: String) {
+        self.myCall = myCall.uppercased()
+        self.myGrid = myGrid.uppercased()
+        self.dxCall = (p.deCall ?? "").uppercased()
+        self.dxGrid = (dxGrid ?? p.grid)?.uppercased()
+        self.reportToSend = heardSnr
+        self.directive = nil
+        if p.is73 || p.isRR73 {
+            self.reportReceived = nil;       self.phase = .seventyThree  // closing → 73
+        } else if p.rogerReport {
+            self.reportReceived = p.report;  self.phase = .rr73          // R-report → RR73
+        } else if p.report != nil {
+            self.reportReceived = p.report;  self.phase = .rReport       // report → R-report
+        } else {
+            self.reportReceived = nil;       self.phase = .report        // grid/bare → report
+        }
+    }
+
     /// Call CQ; adopts whoever answers and continues the exchange.
     public init(callCQ myCall: String, myGrid: String, directive: String? = nil) {
         self.myCall = myCall.uppercased()

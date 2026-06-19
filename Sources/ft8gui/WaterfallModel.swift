@@ -372,16 +372,30 @@ final class WaterfallModel: ObservableObject {
 
     // MARK: Operating actions — load a contact into the sequencer
 
-    /// Click a decode → load a QSO answering it (Tx1 reply, on its frequency, in
-    /// the opposite slot), replacing any current QSO. If TX is enabled it starts
-    /// transmitting on the next correct slot — no extra click needed. Decodes
-    /// without an answerable callsign just get selected (highlighted).
+    /// Click a decode → load a QSO with that station, on its frequency, in the
+    /// opposite slot, replacing any current QSO. If the decode is already
+    /// addressed to us (a station answering our CQ — grid / report / R-report),
+    /// resume at the correct reply instead of restarting at Tx1; otherwise we
+    /// answer fresh (send our grid first). If TX is enabled it transmits on the
+    /// next correct slot — no extra click. Decodes without an answerable callsign
+    /// just get selected (highlighted).
     func select(_ d: Decode) {
         selectedID = d.id
         guard let call = d.call, !call.isEmpty, !myCall.isEmpty,
               call.uppercased() != myCall.uppercased() else { return }
-        qso = QSOSequencer(answer: call, dxGrid: d.grid, heardSnr: Int(d.snr.rounded()),
-                           myCall: myCall, myGrid: myGrid)
+        let snr = Int(d.snr.rounded())
+        if d.toMe, let p = QSOMessages.parse(d.text), p.deCall != nil {
+            // Mid-exchange reply to us — pick up at the right phase. Pull a grid
+            // from an earlier decode of this station if this message has none.
+            let grid = d.grid ?? decodes.first {
+                $0.call?.uppercased() == call.uppercased() && $0.grid != nil
+            }?.grid
+            qso = QSOSequencer(resuming: p, dxGrid: grid, heardSnr: snr,
+                               myCall: myCall, myGrid: myGrid)
+        } else {
+            qso = QSOSequencer(answer: call, dxGrid: d.grid, heardSnr: snr,
+                               myCall: myCall, myGrid: myGrid)
+        }
         txParity = SlotClock.parity(at: d.time).toggled
         setTxOffset(d.freq)
         pounceArmed = true               // go this slot if we're early enough
