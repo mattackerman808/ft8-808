@@ -16,6 +16,12 @@ struct Decode: Identifiable {
     let grid: String?         // sender grid, if parsed
     let isCQ: Bool
     let toMe: Bool            // addressed to my callsign
+    var isTx = false         // our own transmitted message (TX echo), not an RX decode
+    var isLogged = false     // a "✓ QSO logged" banner line, not a real decode
+
+    /// Even (:00/:30) vs odd (:15/:45) slot this was heard in — drives the
+    /// parity marker and the opposite-slot reply.
+    var isEvenSlot: Bool { SlotClock.parity(at: time) == .even }
 }
 
 
@@ -46,7 +52,15 @@ final class WaterfallModel: ObservableObject {
     @Published var txEnabled = false
     @Published var sending = false
     private var txTask: Task<Void, Never>?
-    private var txParity: SlotParity = .even
+    /// One-shot "pounce": a freshly loaded contact transmits ASAP — fires in the
+    /// CURRENT slot if it's ours and early enough for the message to still fit,
+    /// and skips the decode-grace (the initial reply needs no decode-wait).
+    /// Cleared after the first transmit so ongoing QSOs keep their grace.
+    private var pounceArmed = false
+    private let pounceWindow: Double = 2.0   // s into our slot; message must still fit 15 s
+    /// Which 15 s sequence we transmit in (even :00/:30, odd :15/:45). Operator-
+    /// settable for CQ; auto-set to the opposite slot when answering a decode.
+    @Published var txParity: SlotParity = .even
 
     // Tuner / transmit (tune keys the rig).
     @Published var tuning = false
@@ -75,7 +89,7 @@ final class WaterfallModel: ObservableObject {
     /// Involves me (addressed to me, or from my current QSO partner) — these
     /// always show through any filter.
     private func mine(_ d: Decode) -> Bool {
-        if d.toMe { return true }
+        if d.isTx || d.isLogged || d.toMe { return true }   // my TX / log banner / to me
         if let dx = qso?.dxCall, !dx.isEmpty, let c = d.call, c == dx { return true }
         return false
     }
@@ -86,9 +100,11 @@ final class WaterfallModel: ObservableObject {
         decodes.filter { abs($0.freq - txOffsetHz) <= 80 || mine($0) }
     }
 
-    /// Left (passband) list: the whole band, optionally CQ-only.
+    /// Left (passband) list: real band activity. Our own TX echoes and the
+    /// logged-QSO banner are RX-box-only, so keep them out of here.
     var passbandDecodes: [Decode] {
-        cqOnly ? decodes.filter { $0.isCQ || mine($0) } : decodes
+        let band = decodes.filter { !$0.isTx && !$0.isLogged }
+        return cqOnly ? band.filter { $0.isCQ || mine($0) } : band
     }
 
     // Rig status (read-only polling) for the meter deck.
@@ -97,8 +113,14 @@ final class WaterfallModel: ObservableObject {
     @Published private(set) var rigMeters: RigMeters?
     @Published var meterTest = false
 
+    /// Callsigns already worked (uppercased), read from the ADIF log — drives the
+    /// "worked before" (red) highlight in the decode lists. Refreshed after each
+    /// logged QSO.
+    @Published private(set) var workedCalls: Set<String> = []
+
     private var rig: RigController?
     private var rigTask: Task<Void, Never>?
+    private var meterTask: Task<Void, Never>?
 
     let renderer = WaterfallRenderer()
 
@@ -113,6 +135,11 @@ final class WaterfallModel: ObservableObject {
 
     private let targetVisibleSeconds: Double = 24
     private let maxDecodes = 400
+
+    // Rolling "busy map" (per-slot EMA of the normalized spectrum) + its passband,
+    // for the free-frequency picker — mirrors the TUI's auto-pick.
+    private var avgSpectrum: [Float] = []
+    private var pickPassband: ClosedRange<Float> = 200...3000
 
     // Adaptive normalisation state (dB).
     private var floorDB = Float.nan
@@ -136,6 +163,7 @@ final class WaterfallModel: ObservableObject {
         let dm = UserDefaults.standard.object(forKey: "displayMode") as? Int ?? 2
         waterfallEnabled = (dm != 0)
         mode = (dm == 1) ? .twoD : .threeD
+        workedCalls = ADIFLog.workedCalls()
         Task { await connectRig() }
         start()    // auto-start; the device comes from Settings (config.audioInput)
     }
@@ -184,6 +212,8 @@ final class WaterfallModel: ObservableObject {
         }
         tx = out
         tuning = true
+        rigState.transmitting = true
+        startMeterPoll()
         status = "Tuning…"
     }
 
@@ -191,6 +221,8 @@ final class WaterfallModel: ObservableObject {
         guard tuning else { return }
         tx?.stop(); tx = nil
         try? await rig?.setPTT(false)
+        stopMeterPoll()
+        rigState.transmitting = false
         tuning = false
         radio?.resume()
         status = isRunning ? "Listening…" : "Idle"
@@ -210,45 +242,70 @@ final class WaterfallModel: ObservableObject {
         }
     }
 
-    /// Sweep TX drive, find the power knee (lowest drive reaching ~97% of peak),
-    /// set it, stop, and persist. Ported from the TUI's autoTune.
+    /// Sweep TX drive and settle on the power knee (lowest drive reaching ~97%
+    /// of the peak seen), then stop and persist. Faithful port of the TUI's
+    /// autoTune — same -34→-3 sweep, no early break.
     func autoTune() async {
         guard !autoTuning, let rig else { return }
-        let startDb: Float = -34
-        // Drop to the sweep's start BEFORE keying, so we never blip at the
-        // slider's current (possibly high) level.
-        setDrive(startDb)
+
         if !tuning { await startTune(); guard tuning else { return } }
+
+        // Need power readback to find the knee.
         guard let probe = await rig.meters(),
               probe.powerWatts != nil || probe.powerPercent != nil else {
-            status = "auto-tune needs rig power readback over CAT"
+            await stopTune()   // keyed above; never leave the rig transmitting
+            status = "auto-tune needs rig power readback over CAT (not reported)"
             return
         }
+
         autoTuning = true
         defer { autoTuning = false }
 
         func power(_ m: RigMeters?) -> Float { m?.powerWatts ?? ((m?.powerPercent ?? 0) * 100) }
+
+        // Sweep up, no early break. The FTDX power meter lags over CAT, so per
+        // step we settle, then take TWO reads and keep the higher — that absorbs
+        // the meter still catching up to a rising level.
+        let startDb: Float = -60   // start fully backed off (slider minimum), then ramp up
+        let maxDb: Float = -3
+        let stepDb: Float = 2
         var samples: [(db: Float, power: Float, alc: Float)] = []
         var db = startDb
-        while db <= -3 {
+        while db <= maxDb {
             if !tuning || Task.isCancelled { break }
             setDrive(db)
             try? await Task.sleep(nanoseconds: 600_000_000)
             let p1 = power(await rig.meters())
             try? await Task.sleep(nanoseconds: 350_000_000)
             let m2 = await rig.meters()
-            samples.append((db, max(p1, power(m2)), m2?.alc ?? 0))
-            status = String(format: "auto-tune %+.0f dBFS → %.0f W", db, max(p1, power(m2)))
-            db += 2
+            let p = max(p1, power(m2))        // keep the settled (higher) reading
+            let alc = m2?.alc ?? 0
+            samples.append((db, p, alc))
+            status = String(format: "auto-tune %+.0f dBFS → %.0f W  ALC %.2f", db, p, alc)
+            db += stepDb
         }
+
         let maxPower = samples.map(\.power).max() ?? 0
         if maxPower <= 0 {
             await stopTune()
             status = "auto-tune: no RF at any drive — check rig USB audio is the TX source"
             return
         }
-        let target = maxPower * 0.97
-        let pick = samples.first(where: { $0.power >= target }) ?? samples.max(by: { $0.power < $1.power })
+        // FT8 wants ALC barely tickling: past that point more drive only feeds ALC
+        // compression (= splatter), not power. So pick the HIGHEST drive whose ALC
+        // is still in the clean zone — that's the real knee. Only if the rig never
+        // shows usable ALC (stays under the limit even at full drive) do we fall
+        // back to the 97%-of-peak power knee.
+        let alcLimit: Float = 1.0
+        let pick: (db: Float, power: Float, alc: Float)?
+        if (samples.map(\.alc).max() ?? 0) > alcLimit {
+            pick = samples.filter { $0.alc <= alcLimit }.max(by: { $0.db < $1.db })
+                ?? samples.min(by: { $0.alc < $1.alc })
+        } else {
+            let target = maxPower * 0.97
+            pick = samples.first(where: { $0.power >= target })
+                ?? samples.max(by: { $0.power < $1.power })
+        }
         let knee = pick?.db ?? txLevelDb
         setDrive(knee)
         await stopTune()
@@ -281,6 +338,7 @@ final class WaterfallModel: ObservableObject {
 
     func reconnectRig() async {
         rigTask?.cancel(); rigTask = nil
+        meterTask?.cancel(); meterTask = nil
         await (rig as? HamlibRigController)?.close()
         rig = nil
         rigState = RigState(frequencyHz: 0, mode: .usb, transmitting: false, connected: false)
@@ -309,59 +367,75 @@ final class WaterfallModel: ObservableObject {
         }
     }
 
-    // MARK: Operating actions (no transmit yet — set up state only)
+    // MARK: Operating actions — load a contact into the sequencer
 
-    func select(_ d: Decode) { selectedID = (selectedID == d.id) ? nil : d.id }
-
-    /// Arm the sequencer to call CQ (sits on Tx6). Does NOT transmit until
-    /// Enable TX is pressed.
-    func callCQ() {
-        guard !myCall.isEmpty else { return }
-        qso = QSOSequencer(callCQ: myCall, myGrid: myGrid, directive: config.cqDirective)
-        txParity = .even
-        status = "CQ armed — press Enable TX"
-    }
-
-    /// Commit a QSO answering the selected decode (on its frequency, opposite slot).
-    func answerSelected() {
-        guard let d = selectedDecode, let call = d.call, !myCall.isEmpty else { return }
+    /// Click a decode → load a QSO answering it (Tx1 reply, on its frequency, in
+    /// the opposite slot), replacing any current QSO. If TX is enabled it starts
+    /// transmitting on the next correct slot — no extra click needed. Decodes
+    /// without an answerable callsign just get selected (highlighted).
+    func select(_ d: Decode) {
+        selectedID = d.id
+        guard let call = d.call, !call.isEmpty, !myCall.isEmpty,
+              call.uppercased() != myCall.uppercased() else { return }
         qso = QSOSequencer(answer: call, dxGrid: d.grid, heardSnr: Int(d.snr.rounded()),
                            myCall: myCall, myGrid: myGrid)
         txParity = SlotClock.parity(at: d.time).toggled
         setTxOffset(d.freq)
+        pounceArmed = true               // go this slot if we're early enough
+        if txEnabled { startTxLoop() }   // resync the slot loop to the new parity
+        status = txEnabled ? "Answering \(call)" : "Answering \(call) — Enable TX to send"
     }
 
+    /// Load the CQ sequence (sits on Tx6), keeping the operator's chosen cycle.
+    /// Replaces any current QSO; transmits next slot if TX is enabled.
+    func callCQ() {
+        guard !myCall.isEmpty else { return }
+        qso = QSOSequencer(callCQ: myCall, myGrid: myGrid, directive: config.cqDirective)
+        selectedID = nil
+        pounceArmed = true
+        if txEnabled { startTxLoop() }
+        status = txEnabled ? "Calling CQ (\(txParity == .even ? "even" : "odd") slot)"
+                           : "CQ loaded — Enable TX to send"
+    }
+
+    /// Clear the loaded contact (master TX toggle is left as-is).
     func clearQSO() {
-        haltTX()
         qso = nil
         selectedID = nil
+        status = txEnabled ? "TX enabled — pick a station or Call CQ"
+                           : (isRunning ? "Listening…" : "Idle")
     }
 
     // MARK: Transmit
 
-    /// Enable TX button: arm (and commit a selected decode as the QSO if needed),
-    /// or — if already armed — disarm, letting any in-flight message finish.
+    /// Master TX toggle. On → the slot loop transmits the loaded QSO each correct
+    /// slot; off → disarm (any in-flight message still finishes). Loading a
+    /// contact / Call CQ feeds the sequencer; this just gates whether it keys.
     func enableTX() async {
         if txEnabled { disarmTX(); return }
-        if qso == nil { answerSelected() }
-        guard qso != nil else { status = "Nothing to send — Call CQ or select a decode"; return }
         if tuning { await stopTune() }
         txEnabled = true
-        status = "Armed — TX on next \(txParity == .even ? ":00/:30" : ":15/:45")"
+        if qso != nil { pounceArmed = true }   // fire the loaded contact ASAP
+        status = qso == nil ? "TX enabled — pick a station or Call CQ"
+                            : "TX enabled — \(txParity == .even ? ":00/:30" : ":15/:45") slot"
         startTxLoop()
     }
 
     /// Stop arming; an in-flight transmission completes (not cut).
     func disarmTX() {
         txEnabled = false
+        pounceArmed = false
         status = sending ? "Finishing current TX…" : (isRunning ? "Listening…" : "Idle")
     }
 
     /// Stop transmitting immediately, mid-message if needed.
     func haltTX() {
         txEnabled = false
+        pounceArmed = false
         txTask?.cancel(); txTask = nil
         tx?.stop(); tx = nil
+        stopMeterPoll()
+        rigState.transmitting = false
         sending = false
         Task { try? await rig?.setPTT(false) }
         status = "TX halted"
@@ -371,18 +445,33 @@ final class WaterfallModel: ObservableObject {
         txTask?.cancel()
         txTask = Task { @MainActor [weak self] in
             while let self, self.txEnabled, !Task.isCancelled {
-                let wait = SlotClock.secondsUntilNextSlot(parity: self.txParity, after: Date())
-                try? await Task.sleep(nanoseconds: UInt64(max(0, wait) * 1_000_000_000))
-                if Task.isCancelled || !self.txEnabled { break }
-                await self.transmitCurrentSlot()
+                let now = Date()
+                let posInSlot = now.timeIntervalSince1970
+                    .truncatingRemainder(dividingBy: SlotClock.slotSeconds)
+                let inOurSlot = SlotClock.parity(at: now) == self.txParity
+                // Pounce: a freshly armed contact goes out in THIS slot if it's
+                // ours and we're early enough for the message to still fit;
+                // otherwise wait for the next slot boundary.
+                let fireNow = self.pounceArmed && inOurSlot
+                            && posInSlot < self.pounceWindow && self.qso?.message() != nil
+                if !fireNow {
+                    let wait = SlotClock.secondsUntilNextSlot(parity: self.txParity, after: now)
+                    try? await Task.sleep(nanoseconds: UInt64(max(0, wait) * 1_000_000_000))
+                    if Task.isCancelled || !self.txEnabled { break }
+                }
+                let skipGrace = self.pounceArmed   // initial reply needs no decode-wait
+                self.pounceArmed = false
+                await self.transmitCurrentSlot(pounce: skipGrace)
             }
         }
     }
 
-    private func transmitCurrentSlot() async {
+    private func transmitCurrentSlot(pounce: Bool = false) async {
         guard txEnabled, !sending, let rig else { return }
-        // Grace: let this slot's decode advance the QSO before picking text.
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        if !pounce {
+            // Grace: let this slot's decode advance the QSO before picking text.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
         guard txEnabled, !sending, !Task.isCancelled, let text = qso?.message() else { return }
         let closing = qso?.phase == .rr73 || qso?.phase == .seventyThree
 
@@ -412,6 +501,9 @@ final class WaterfallModel: ObservableObject {
         }
         tx = out
         sending = true
+        rigState.transmitting = true   // instant TX lamp/glow; the poll confirms it
+        startMeterPoll()               // live PWR / ALC / SWR off the rig over CAT
+        addTxEcho(text)                // show our own TX in the decode lists
         status = "Sending: \(text)"
 
         // Finish the message even if disarmed mid-flight; Halt cancels the task.
@@ -421,9 +513,21 @@ final class WaterfallModel: ObservableObject {
         out.stop()
         tx = nil
         try? await rig.setPTT(false)
+        stopMeterPoll()
+        rigState.transmitting = false
         sending = false
         if closing && txEnabled { completeQSO() }
-        else { status = txEnabled ? "Armed" : (isRunning ? "Listening…" : "Idle") }
+        else { status = txEnabled ? "TX enabled" : (isRunning ? "Listening…" : "Idle") }
+    }
+
+    /// Insert our own transmitted message into the decode lists (TX echo) so the
+    /// operator sees what went out, in the RX-frequency window and the passband.
+    private func addTxEcho(_ text: String) {
+        decodes.insert(Decode(time: Date(), mediaTime: CACurrentMediaTime(),
+                              freq: txOffsetHz, snr: 0, text: text,
+                              call: myCall, grid: nil, isCQ: text.hasPrefix("CQ"),
+                              toMe: false, isTx: true), at: 0)
+        if decodes.count > maxDecodes { decodes.removeLast(decodes.count - maxDecodes) }
     }
 
     /// Final message sent — log the QSO and stop transmitting.
@@ -441,12 +545,27 @@ final class WaterfallModel: ObservableObject {
             grid: q.dxGrid,
             myCall: myCall, myGrid: myGrid)
         _ = try? ADIFLog.append(rec)
+        workedCalls.insert(q.dxCall.uppercased())   // light it up red right away
+        let sent = QSOMessages.formatReport(q.reportToSend)
+        let rcvd = q.reportReceived.map(QSOMessages.formatReport) ?? "—"
+        addLoggedBanner(call: q.dxCall, sent: sent, rcvd: rcvd)
         let call = q.dxCall
         qso = nil
-        txEnabled = false
-        txTask?.cancel(); txTask = nil
-        status = "Logged \(call)"
+        // Leave the master TX toggle on (idles with no QSO loaded) so the next
+        // station/CQ goes out without re-enabling.
+        status = "Logged \(call) — pick next or Call CQ"
         if config.lotwEnabled { uploadLog() }
+    }
+
+    /// Drop a green "✓ QSO logged" banner line into the decode lists, like the
+    /// TUI, so a completed QSO is clearly marked in the feed (not just the status).
+    private func addLoggedBanner(call: String, sent: String, rcvd: String) {
+        let text = "✓ QSO  \(call)  sent \(sent)  rcvd \(rcvd)"
+        decodes.insert(Decode(time: Date(), mediaTime: CACurrentMediaTime(),
+                              freq: txOffsetHz, snr: 0, text: text,
+                              call: call, grid: nil, isCQ: false, toMe: false,
+                              isLogged: true), at: 0)
+        if decodes.count > maxDecodes { decodes.removeLast(decodes.count - maxDecodes) }
     }
 
     /// Snap the TX audio offset into the passband on a 5 Hz grid. `persist`
@@ -466,6 +585,39 @@ final class WaterfallModel: ObservableObject {
         }
     }
 
+    // MARK: Rig tuning (write)
+
+    /// The current band, if the rig's dial matches a known FT8 frequency.
+    var currentBand: FT8Band? { FT8Bands.matching(rigState.frequencyHz) }
+
+    /// Set the rig's VFO. Optimistically updates the display; the poll confirms.
+    /// Refused while transmitting (never move the dial mid-over).
+    func setRigFrequency(_ hz: Int) {
+        guard let rig, rigState.connected, !sending else { return }
+        let target = max(0, hz)
+        rigState.frequencyHz = target
+        Task { try? await rig.setFrequency(target) }
+    }
+
+    /// Jump to a band's standard FT8 dial frequency.
+    func tuneToBand(_ band: FT8Band) { setRigFrequency(band.dialHz) }
+
+    /// Nudge the VFO up/down (e.g. the tuning steppers).
+    func nudgeFrequency(_ deltaHz: Int) { setRigFrequency(rigState.frequencyHz + deltaHz) }
+
+    /// Pick a clear, central ~50 Hz TX audio offset from the rolling busy map —
+    /// the TUI's free-frequency feature. Prefers the 800–2000 Hz heart of the band.
+    func autoPickTxFrequency() {
+        guard let hz = FrequencyPicker.clearOffset(busyMap: avgSpectrum,
+                                                   passband: pickPassband,
+                                                   usable: 800...2000) else {
+            status = "No spectrum yet — wait for a slot"
+            return
+        }
+        setTxOffset(hz)
+        status = "Auto-pick → TX \(Int(txOffsetHz)) Hz"
+    }
+
     // MARK: Rig (read-only)
 
     /// Open the configured rig and poll state + meters. Polling is non-destructive
@@ -482,15 +634,46 @@ final class WaterfallModel: ObservableObject {
         rigTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self, let rig = self.rig else { break }
-                // Publish only on change — assigning @Published every poll would
-                // re-render the whole view tree (both decode lists) at 7 Hz.
+                // State only (freq/mode/PTT). Meters are polled separately — see
+                // startMeterPoll(). Publish only on change: assigning @Published
+                // every poll would re-render the whole view tree (both decode lists).
                 let s = await rig.state()
                 if s != self.rigState { self.rigState = s }
-                let m = await rig.meters()
-                if m != self.rigMeters { self.rigMeters = m }
-                try? await Task.sleep(nanoseconds: 150_000_000)   // ~7 Hz
+                try? await Task.sleep(nanoseconds: 500_000_000)   // 2 Hz
             }
         }
+    }
+
+    /// Poll the rig's TX meters (PWR/ALC/SWR) a few times a second while keyed.
+    /// Deliberately a SEPARATE task from the state poll, and off the MainActor:
+    /// folding meters into the state loop made every meter read wait behind the
+    /// freq/mode CAT reads (and the 60 fps Metal/SwiftUI render load on the
+    /// MainActor), which starved them to nothing and left the GUI gauges frozen
+    /// at zero during transmit even though isolated reads (auto-tune, the TUI)
+    /// worked. Mirrors ft8term's dedicated `startMeterPoll`.
+    private func startMeterPoll() {
+        guard meterTask == nil, let rig = self.rig else { return }
+        meterTask = Task.detached { [weak self] in
+            while !Task.isCancelled {
+                let m = await rig.meters()
+                await MainActor.run {
+                    guard let self else { return }
+                    // Detect a wide-scale ALC rig (Kenwood/Yaesu ~0–5): if it ever
+                    // reports above the Hamlib-standard 0–1 range, normalise the
+                    // gauge by 5 from then on. Standard 0–1 rigs never trip this.
+                    if let a = m?.alc, a > 1.0 { self.alcWideScale = true }
+                    if m != self.rigMeters { self.rigMeters = m }
+                }
+                try? await Task.sleep(nanoseconds: 200_000_000)   // 5 Hz
+            }
+        }
+    }
+
+    /// Stop the meter poll and drop the needles back to zero (no RF off-air).
+    private func stopMeterPoll() {
+        meterTask?.cancel()
+        meterTask = nil
+        rigMeters = nil
     }
 
     var transmitting: Bool { rigState.transmitting }
@@ -504,9 +687,20 @@ final class WaterfallModel: ObservableObject {
                     0.5 + 0.45 * sin(t * 1.9 + 2.2))
         }
         let m = rigMeters
-        let power = Double(m?.powerPercent ?? m?.powerWatts.map { $0 } ?? 0) / 100.0
+        // powerWatts is in watts (≈0…100 full scale → /100); powerPercent is a
+        // 0…1 fraction of the rig's max (Hamlib convention) — already the needle
+        // fraction, do NOT divide. (Dividing the fraction by 100 pinned PWR at 0.)
+        let power: Double
+        if let w = m?.powerWatts { power = Double(w) / 100.0 }
+        else if let p = m?.powerPercent { power = Double(p) }
+        else { power = 0 }
         let swr = swrFraction(Double(m?.swr ?? 1))
-        let alc = Double(m?.alc ?? 0)        // scale is rig-dependent; clamped
+        // ALC scale is rig-dependent: Hamlib's spec is 0–1, but Kenwood/Yaesu
+        // report ~0–5 over CAT (a light "1 bar" reads ~1.0 and pegs a raw gauge).
+        // Only normalise by 5 for rigs we've actually seen exceed 1.0 — standard
+        // 0–1 rigs are left untouched.
+        let rawAlc = Double(m?.alc ?? 0)
+        let alc = alcWideScale ? rawAlc / Self.alcFullScale : rawAlc
         return (clamp01(power), clamp01(swr), clamp01(alc))
     }
 
@@ -523,6 +717,12 @@ final class WaterfallModel: ObservableObject {
     }
 
     private func clamp01(_ x: Double) -> Double { min(1, max(0, x)) }
+
+    /// Full-scale ALC reading for wide-scale (Kenwood/Yaesu ~0–5) rigs.
+    private static let alcFullScale: Double = 5
+    /// Set once the rig reports ALC above 1.0 — i.e. it's on the ~0–5 scale, not
+    /// the Hamlib-standard 0–1. Until then we pass ALC through unscaled.
+    private var alcWideScale = false
 
     func refreshDevices() {
         devices = AudioDevices.allDevices().filter { $0.inputChannels > 0 }
@@ -604,6 +804,21 @@ final class WaterfallModel: ObservableObject {
 
     private func ingest(_ result: SlotResult) {
         guard !sending else { return }   // drop the slot containing our own TX
+
+        // Maintain a rolling busy map (exponential moving average) so the free-
+        // frequency picker sees recent occupancy, not one noisy slot. Skip while
+        // tuning — that capture is the rig's TX monitor, not real RX.
+        if !tuning {
+            if avgSpectrum.count != result.spectrum.count {
+                avgSpectrum = result.spectrum
+            } else {
+                for i in avgSpectrum.indices {
+                    avgSpectrum[i] = avgSpectrum[i] * 0.6 + result.spectrum[i] * 0.4
+                }
+            }
+            pickPassband = result.passband
+        }
+
         let now = CACurrentMediaTime()
         let slotTime = result.startTime ?? Date()
         let span = max(1, fMax - fMin)

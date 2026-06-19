@@ -1,7 +1,8 @@
 name: release
 
 # Build a universal (arm64 + x86_64), signed, notarized, stapled .pkg installer
-# and attach it to a GitHub Release.
+# that drops FT8-808.app into /Applications and the ft8term CLI into
+# /usr/local/bin, and attach it to a GitHub Release.
 #
 # Signing/notarization are CONDITIONAL on repository secrets being present, so
 # this workflow runs as-is (producing an unsigned .pkg) until you add them — see
@@ -37,7 +38,7 @@ jobs:
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then V="${GITHUB_REF_NAME#v}"; else V="${{ github.event.inputs.version }}"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "Building ft8term $V"
+          echo "Building FT8-808 $V (FT8-808.app + ft8term CLI)"
 
       - name: Build universal Hamlib
         run: ARCHS="arm64 x86_64" Scripts/build-hamlib.sh
@@ -61,12 +62,26 @@ jobs:
           echo "BIN=$BIN"     >> "$GITHUB_ENV"
           echo "DYLIB=$DYLIB" >> "$GITHUB_ENV"
 
+      - name: Build ft8gui (universal, release)
+        run: |
+          set -euo pipefail
+          swift build -c release --arch arm64  --product ft8gui
+          swift build -c release --arch x86_64 --product ft8gui
+          ARM_DIR="$(swift build -c release --arch arm64  --show-bin-path)"
+          X86_DIR="$(swift build -c release --arch x86_64 --show-bin-path)"
+          GUI="$RUNNER_TEMP/uni/ft8gui"
+          lipo -create "$ARM_DIR/ft8gui" "$X86_DIR/ft8gui" -output "$GUI"
+          echo "GUI=$GUI" >> "$GITHUB_ENV"
+
       - name: Verify universal slices
         run: |
           echo "ft8term: $(lipo -archs "$BIN")"
+          echo "ft8gui:  $(lipo -archs "$GUI")"
           echo "hamlib:  $(lipo -archs "$DYLIB")"
-          lipo -archs "$BIN" | grep -q arm64
-          lipo -archs "$BIN" | grep -q x86_64
+          for f in "$BIN" "$GUI"; do
+            lipo -archs "$f" | grep -q arm64
+            lipo -archs "$f" | grep -q x86_64
+          done
 
       - name: Detect signing config
         id: cfg
@@ -115,24 +130,51 @@ jobs:
             --sign "$APP_ID" "$BIN"
           codesign --verify --strict --verbose=2 "$BIN"
 
+      - name: Assemble FT8-808.app (signed if an identity is present)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stage/Applications"
+          # Passing APP_ID (set only when signing) makes the script sign the app
+          # bundle + its embedded dylib with the hardened runtime; empty = unsigned.
+          Scripts/build-app-bundle.sh "$GUI" "$DYLIB" "${{ steps.ver.outputs.version }}" \
+            "$RUNNER_TEMP/stage/Applications" "${APP_ID:-}"
+
       - name: Build .pkg installer
         id: pkg
         run: |
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
-          STAGE="$RUNNER_TEMP/stage/usr/local/bin"
-          mkdir -p "$STAGE"
-          cp "$BIN" "$DYLIB" "$STAGE/"
-          pkgbuild --root "$RUNNER_TEMP/stage" \
-            --identifier org.808.ft8term \
+          STAGE="$RUNNER_TEMP/stage"
+          # CLI alongside the app (the app was already staged in Applications).
+          mkdir -p "$STAGE/usr/local/bin"
+          cp "$BIN" "$DYLIB" "$STAGE/usr/local/bin/"
+          # Pin the app to /Applications (non-relocatable) so it doesn't install
+          # over a copy found elsewhere.
+          cat > "$RUNNER_TEMP/component.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <array>
+            <dict>
+              <key>RootRelativeBundlePath</key><string>Applications/FT8-808.app</string>
+              <key>BundleIsRelocatable</key><false/>
+              <key>BundleIsVersionChecked</key><true/>
+              <key>BundleOverwriteAction</key><string>upgrade</string>
+            </dict>
+          </array>
+          </plist>
+          EOF
+          pkgbuild --root "$STAGE" \
+            --component-plist "$RUNNER_TEMP/component.plist" \
+            --identifier org.808.ft8808 \
             --version "$V" \
             --install-location / \
-            "$RUNNER_TEMP/ft8term-unsigned.pkg"
-          OUT="ft8term-$V.pkg"
+            "$RUNNER_TEMP/ft8808-unsigned.pkg"
+          OUT="FT8-808-$V.pkg"
           if [ "${{ steps.cfg.outputs.sign }}" = "true" ] && [ -n "${INST_ID:-}" ]; then
-            productsign --sign "$INST_ID" "$RUNNER_TEMP/ft8term-unsigned.pkg" "$OUT"
+            productsign --sign "$INST_ID" "$RUNNER_TEMP/ft8808-unsigned.pkg" "$OUT"
           else
-            cp "$RUNNER_TEMP/ft8term-unsigned.pkg" "$OUT"
+            cp "$RUNNER_TEMP/ft8808-unsigned.pkg" "$OUT"
             echo "::warning::No Developer ID Installer identity — shipping an UNSIGNED .pkg."
           fi
           echo "pkg=$OUT" >> "$GITHUB_OUTPUT"
@@ -157,7 +199,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ft8term-pkg
+          name: ft8808-pkg
           path: ${{ steps.pkg.outputs.pkg }}
 
       - name: Create GitHub Release
