@@ -91,7 +91,9 @@ let package = Package(
         .executableTarget(
             name: "ft8gui",
             dependencies: ["FT8Codec", "FT8808Engine", "HamlibRig"],
-            exclude: ["Info.plist"],
+            // Info.plist is embedded via the linker; AppIcon.icns is consumed by
+            // Scripts/build-app-bundle.sh — neither is a SwiftPM resource.
+            exclude: ["Info.plist", "AppIcon.icns"],
             linkerSettings: [
                 // Embed an Info.plist so TCC can show a mic-permission prompt
                 // and the app gets a bundle identity for windowing.

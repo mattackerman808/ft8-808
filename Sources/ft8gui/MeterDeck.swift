@@ -56,6 +56,8 @@ struct VFODisplay: View {
                     .shadow(color: digit.opacity(0.55), radius: 5)
             }
             .font(.system(size: 28, weight: .bold, design: .monospaced))
+            // Scroll over the digits to tune (MHz / kHz / 100 Hz by position).
+            .overlay(ScrollTuneCatcher { model.nudgeFrequency($0) })
 
             Text("MHz")
                 .font(.system(size: 9, weight: .bold))

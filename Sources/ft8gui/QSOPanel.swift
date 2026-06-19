@@ -9,8 +9,11 @@ struct QSOPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            freqControl
+            // MIDDLE: operating controls + TX cycle selector.
+            controls
+            parityControl
             Divider()
+            // BOTTOM: QSO status + the Tx1–Tx6 sequencer.
             header
             if let q = activeQSO {
                 reports(q)
@@ -19,7 +22,6 @@ struct QSOPanel: View {
                 Text("Set your callsign in Settings to enable QSOs.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            controls
         }
         .padding(10)
         .background(Color(nsColor: .underPageBackgroundColor))
@@ -37,32 +39,6 @@ struct QSOPanel: View {
         if model.qso != nil { return ("QSO", .green) }
         if model.selectedDecode?.call != nil { return ("PREVIEW", .orange) }
         return ("READY", .secondary)
-    }
-
-    // MARK: RX/TX frequency (sets the waterfall marker + the Near-Rx filter)
-
-    private var freqControl: some View {
-        HStack(spacing: 8) {
-            Text("RX / TX")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-            TextField("Hz", value: freqBinding, format: .number)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 64)
-                .multilineTextAlignment(.trailing)
-                .font(.system(size: 13, weight: .semibold, design: .monospaced))
-            Text("Hz").font(.caption).foregroundStyle(.secondary)
-            Stepper("", value: freqBinding, in: 0...10_000, step: 10)
-                .labelsHidden()
-            Spacer()
-            Text("click waterfall to set")
-                .font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-
-    private var freqBinding: Binding<Int> {
-        Binding(get: { Int(model.txOffsetHz.rounded()) },
-                set: { model.setTxOffset(Float($0)) })
     }
 
     // MARK: Header
@@ -133,25 +109,93 @@ struct QSOPanel: View {
         }
     }
 
+    // MARK: TX cycle (even/odd) selector — which slot CQ goes out on
+
+    private var parityControl: some View {
+        HStack(spacing: 8) {
+            Text("TX cycle")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Picker("", selection: $model.txParity) {
+                Text("Even :00/:30").tag(SlotParity.even)
+                Text("Odd :15/:45").tag(SlotParity.odd)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 220)
+            .help("Which 15 s cycle to transmit CQ on (auto-set to the opposite slot when answering a decode)")
+            Spacer()
+        }
+    }
+
     // MARK: Controls
 
     private var controls: some View {
-        HStack(spacing: 8) {
-            Button(model.txEnabled ? "Disable TX" : "Enable TX") {
-                Task { await model.enableTX() }
+        HStack(spacing: 10) {
+            Button { model.callCQ() } label: {
+                Label("Call CQ", systemImage: "megaphone")
             }
-            .tint(model.txEnabled ? .red : .green)
-            .disabled(model.myCall.isEmpty)
-            Button("Call CQ") { model.callCQ() }
-                .disabled(model.myCall.isEmpty)
-            Button("Halt TX") { model.haltTX() }
-                .disabled(!model.txEnabled && !model.sending)
-            Button("Clear") { model.clearQSO() }
-                .disabled(model.qso == nil && model.selectedID == nil)
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .disabled(model.myCall.isEmpty || !model.txEnabled)
+            .help(model.txEnabled ? "Call CQ" : "Enable TX first")
+
+            Button { model.haltTX() } label: {
+                Label("Halt TX", systemImage: "stop.fill")
+            }
+            .tint(.red)
+            .disabled(!model.txEnabled && !model.sending)
+
+            Button { model.clearQSO() } label: {
+                Label("Clear", systemImage: "xmark")
+            }
+            .disabled(model.qso == nil && model.selectedID == nil)
+
             Spacer()
         }
-        .controlSize(.small)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
     }
 
     private func sign(_ n: Int) -> String { n >= 0 ? "+\(n)" : "\(n)" }
+}
+
+/// Top of the right column: the RX/TX frequency field plus the 15 s cycle timer.
+struct RxTxBar: View {
+    @ObservedObject var model: WaterfallModel
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Text("RX / TX")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                TextField("Hz", value: freqBinding, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 64)
+                    .multilineTextAlignment(.trailing)
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                Text("Hz").font(.caption).foregroundStyle(.secondary)
+                Stepper("", value: freqBinding, in: 0...10_000, step: 10)
+                    .labelsHidden()
+                Text("click waterfall to set")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                Button { model.autoPickTxFrequency() } label: {
+                    Label("Find Free", systemImage: "wand.and.stars")
+                }
+                .controlSize(.small)
+                .help("Pick a clear TX frequency in the band's center")
+            }
+            CycleBar(model: model)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    private var freqBinding: Binding<Int> {
+        Binding(get: { Int(model.txOffsetHz.rounded()) },
+                set: { model.setTxOffset(Float($0)) })
+    }
 }

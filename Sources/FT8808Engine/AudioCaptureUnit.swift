@@ -25,6 +25,10 @@ public final class AudioCaptureUnit: @unchecked Sendable {
     fileprivate let targetRate: Double          // rate delivered to the handler
     fileprivate let handler: @Sendable ([Float]) -> Void
     private var unit: AudioUnit?
+    // +1 retain on self for the input callback's refcon; released in stop() only
+    // after the unit is disposed, so an in-flight IO-thread callback can never
+    // dereference freed memory. Balanced exactly once.
+    private var refcon: UnsafeMutableRawPointer?
 
     // HAL input units don't resample, so capture at the device rate (mono) and
     // resample to `targetRate` in software. Built in start() once the hardware
@@ -109,27 +113,41 @@ public final class AudioCaptureUnit: @unchecked Sendable {
             converter = AVAudioConverter(from: inF, to: outF)
         }
 
-        var cb = AURenderCallbackStruct(inputProc: captureRenderCallback,
-                                        inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
-        try set("set input callback", kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
-                &cb, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        // Retain self for the unit's lifetime (released in stop()). Any failure
+        // past this point must release the retain so we don't leak.
+        let ref = Unmanaged.passRetained(self).toOpaque()
+        var cb = AURenderCallbackStruct(inputProc: captureRenderCallback, inputProcRefCon: ref)
+        do {
+            try set("set input callback", kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
+                    &cb, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
 
-        st = AudioUnitInitialize(unit)
-        guard st == noErr else { AudioComponentInstanceDispose(unit); throw CaptureError.configFailed("initialize", st) }
-        st = AudioOutputUnitStart(unit)
-        guard st == noErr else {
-            AudioUnitUninitialize(unit); AudioComponentInstanceDispose(unit)
-            throw CaptureError.configFailed("start", st)
+            st = AudioUnitInitialize(unit)
+            guard st == noErr else { AudioComponentInstanceDispose(unit); throw CaptureError.configFailed("initialize", st) }
+            st = AudioOutputUnitStart(unit)
+            guard st == noErr else {
+                AudioUnitUninitialize(unit); AudioComponentInstanceDispose(unit)
+                throw CaptureError.configFailed("start", st)
+            }
+        } catch {
+            Unmanaged<AudioCaptureUnit>.fromOpaque(ref).release()
+            throw error
         }
         self.unit = unit
+        self.refcon = ref
     }
 
     public func stop() {
         guard let unit else { return }
+        // Stop halts the IO proc, Uninitialize drains any in-flight callback,
+        // Dispose tears down the unit — only then drop the callback's retain.
         AudioOutputUnitStop(unit)
         AudioUnitUninitialize(unit)
         AudioComponentInstanceDispose(unit)
         self.unit = nil
+        if let ref = refcon {
+            Unmanaged<AudioCaptureUnit>.fromOpaque(ref).release()
+            refcon = nil
+        }
     }
 
     /// Pull `frames` of captured mono audio from the unit and hand them off.

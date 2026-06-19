@@ -27,6 +27,11 @@ public final class TxAudioOutput: @unchecked Sendable {
     private let sampleRate: Double
     private let deviceQuery: String?
     private var unit: AudioUnit?
+    // The render callback's refcon: a +1 retain on `self` so the object cannot
+    // be deallocated while the audio unit is live. Released in stop() only after
+    // the unit is fully disposed, so an in-flight IO-thread callback can never
+    // dereference freed memory. Balanced exactly once.
+    private var refcon: UnsafeMutableRawPointer?
 
     /// Tune-tone output: a continuous sine whose amplitude/frequency are
     /// adjustable live (drive calibration).
@@ -105,27 +110,42 @@ public final class TxAudioOutput: @unchecked Sendable {
         try set("set format", kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
                 &asbd, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
 
-        var cb = AURenderCallbackStruct(inputProc: txRenderCallback,
-                                        inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
-        try set("set callback", kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
-                &cb, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        // Retain self for the unit's lifetime (released in stop()). Any failure
+        // past this point must release the retain so we don't leak.
+        let ref = Unmanaged.passRetained(self).toOpaque()
+        var cb = AURenderCallbackStruct(inputProc: txRenderCallback, inputProcRefCon: ref)
+        do {
+            try set("set callback", kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
+                    &cb, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
 
-        st = AudioUnitInitialize(unit)
-        guard st == noErr else { AudioComponentInstanceDispose(unit); throw OutputError.configFailed("initialize", st) }
-        st = AudioOutputUnitStart(unit)
-        guard st == noErr else {
-            AudioUnitUninitialize(unit); AudioComponentInstanceDispose(unit)
-            throw OutputError.configFailed("start", st)
+            st = AudioUnitInitialize(unit)
+            guard st == noErr else { AudioComponentInstanceDispose(unit); throw OutputError.configFailed("initialize", st) }
+            st = AudioOutputUnitStart(unit)
+            guard st == noErr else {
+                AudioUnitUninitialize(unit); AudioComponentInstanceDispose(unit)
+                throw OutputError.configFailed("start", st)
+            }
+        } catch {
+            Unmanaged<TxAudioOutput>.fromOpaque(ref).release()
+            throw error
         }
         self.unit = unit
+        self.refcon = ref
     }
 
     public func stop() {
         guard let unit else { return }
+        // Order matters: Stop halts the IO proc, Uninitialize drains any callback
+        // already in flight, Dispose tears down the unit — only then is it safe to
+        // drop the +1 retain the render callback held on self.
         AudioOutputUnitStop(unit)
         AudioUnitUninitialize(unit)
         AudioComponentInstanceDispose(unit)
         self.unit = nil
+        if let ref = refcon {
+            Unmanaged<TxAudioOutput>.fromOpaque(ref).release()
+            refcon = nil
+        }
     }
 
     fileprivate func render(into ioData: UnsafeMutablePointer<AudioBufferList>, frames: UInt32) {
