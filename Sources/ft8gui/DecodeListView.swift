@@ -28,6 +28,7 @@ struct DecodeListView: View {
                 Divider()
             }
             GeometryReader { outer in
+                let viewportH = outer.size.height   // capture as a Sendable value
                 ScrollViewReader { proxy in
                     ScrollView {
                         // Plain VStack (not Lazy): off-screen rows must stay laid out
@@ -53,7 +54,9 @@ struct DecodeListView: View {
                     // The content's bottom edge sits at ≈viewport height when scrolled
                     // to the bottom, and grows past it as you scroll up.
                     .onPreferenceChange(ContentBottomKey.self) { bottom in
-                        atBottom = bottom <= outer.size.height + 36
+                        // onPreferenceChange's closure is @Sendable on some SDKs;
+                        // hop to the main actor to mutate the @State.
+                        Task { @MainActor in atBottom = bottom <= viewportH + 36 }
                     }
                     // Follow new decodes downward, but only while pinned to the bottom.
                     // `decodes.first` is the newest (model inserts at 0); after the
