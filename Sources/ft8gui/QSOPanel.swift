@@ -57,7 +57,20 @@ struct QSOPanel: View {
                 }
             }
             Spacer()
+            txChip
         }
+    }
+
+    /// Always-visible transmit state, so it's clear whether anything will go out.
+    private var txChip: some View {
+        let (label, color): (String, Color) =
+            model.sending  ? ("SENDING",  .red) :
+            model.txEnabled ? ("TX ARMED", .red) : ("TX OFF", .secondary)
+        return Text(label)
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundStyle(color)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.16)))
     }
 
     private func reports(_ q: QSOSequencer) -> some View {
