@@ -128,7 +128,7 @@ ft8term --call N0CALL --grid FN42 \
 |---|---|
 | `↑`/`↓` or `j`/`k` | pick a decode in the band column |
 | `⏎` | answer the selected station (replies on their freq, opposite slot) |
-| `C` | call CQ |
+| `C` | call CQ (press again to stop) |
 | `E` | enable / disable TX |
 | `O` | swap even/odd transmit slot |
 | `esc` | clear selection / abandon the active QSO |

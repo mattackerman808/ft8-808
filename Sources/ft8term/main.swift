@@ -553,9 +553,14 @@ final class App {
 
     // ---- Transmit: CQ + slot-aligned scheduling -----------------------------
 
-    /// `C` — call CQ: start the sequencer in CQ mode and transmit each slot.
+    /// `C` — call CQ, and a toggle: while we're still calling CQ (nobody has
+    /// answered), pressing it again stops (cuts the over + clears the CQ).
     private func callCQ() {
         guard requireStation() else { return }
+        if let q = qso, q.phase == .cq {        // already calling CQ → stop
+            disableTx(); qso = nil
+            notice = "CQ stopped"; render(); return
+        }
         if tuning { Task { await stopTune(); callCQ() }; return }
         qso = QSOSequencer(callCQ: config.callsign, myGrid: config.grid,
                            directive: config.cqDirective)
