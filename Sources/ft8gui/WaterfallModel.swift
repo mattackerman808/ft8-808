@@ -363,9 +363,12 @@ final class WaterfallModel: ObservableObject {
             case .nothingNew:      msg = "LoTW: nothing new (all already uploaded)"
             case let .failure(e):  msg = "LoTW: \(e)"
             }
-            await MainActor.run { self.status = msg }
+            await self.setStatus(msg)
         }
     }
+
+    /// Set the status line from an off-main task (see `applyMeters` note).
+    private func setStatus(_ s: String) { status = s }
 
     // MARK: Operating actions — load a contact into the sequencer
 
@@ -656,17 +659,20 @@ final class WaterfallModel: ObservableObject {
         meterTask = Task.detached { [weak self] in
             while !Task.isCancelled {
                 let m = await rig.meters()
-                await MainActor.run {
-                    guard let self else { return }
-                    // Detect a wide-scale ALC rig (Kenwood/Yaesu ~0–5): if it ever
-                    // reports above the Hamlib-standard 0–1 range, normalise the
-                    // gauge by 5 from then on. Standard 0–1 rigs never trip this.
-                    if let a = m?.alc, a > 1.0 { self.alcWideScale = true }
-                    if m != self.rigMeters { self.rigMeters = m }
-                }
+                await self?.applyMeters(m)
                 try? await Task.sleep(nanoseconds: 200_000_000)   // 5 Hz
             }
         }
+    }
+
+    /// Publish a fresh meter reading (main-actor state). Called from the off-main
+    /// meter poll; a plain `MainActor.run { self… }` trips Swift 6's sending-self
+    /// check, whereas a main-actor method call is clean.
+    private func applyMeters(_ m: RigMeters?) {
+        // Detect a wide-scale ALC rig (Kenwood/Yaesu ~0–5): once it reports above
+        // the Hamlib-standard 0–1 range, normalise the gauge by 5 from then on.
+        if let a = m?.alc, a > 1.0 { alcWideScale = true }
+        if m != rigMeters { rigMeters = m }
     }
 
     /// Stop the meter poll and drop the needles back to zero (no RF off-air).
