@@ -449,9 +449,10 @@ final class App {
     /// Auto-pick a clear, usable, central ~50 Hz slice from the busy map.
     private func autoPickTxFrequency() {
         let spec = avgSpectrum.isEmpty ? spectrum : avgSpectrum
-        // Prefer the 800–2000 Hz heart of the band, strongly centered.
+        // Search the 500–2500 Hz usable band; pick the clearest slice, centrality
+        // only a mild tiebreaker (see FrequencyPicker).
         guard let hz = FrequencyPicker.clearOffset(busyMap: spec, passband: passband,
-                                                   usable: 800...2000) else {
+                                                   usable: 500...2500) else {
             notice = "no spectrum yet — wait for a slot"; render(); return
         }
         setTxOffset(hz)
@@ -564,8 +565,21 @@ final class App {
         render()
     }
 
+    /// Most recent grid we've heard for `call`, scanning the activity feed — used
+    /// to fill in a log grid when a mid-QSO reply (report/R-report) carries none.
+    private func knownGrid(for call: String) -> String? {
+        for line in activity.reversed() {
+            guard let msg = line.message, let parsed = QSOMessages.parse(msg.text),
+                  parsed.deCall == call, let g = parsed.grid else { continue }
+            return g
+        }
+        return nil
+    }
+
     /// Enter — answer the selected decode: set up the QSO, reply on the DX's
-    /// frequency, and transmit in the opposite slot.
+    /// frequency, and transmit in the opposite slot. If the decode is already
+    /// addressed to us (a station answering our CQ mid-exchange), resume at the
+    /// correct reply instead of restarting at Tx1.
     private func answerSelected() {
         guard requireStation() else { return }
         guard let i = selectedIndex, i < activity.count, let m = activity[i].message else {
@@ -575,8 +589,14 @@ final class App {
             notice = "no callsign to answer on that line"; render(); return
         }
         if tuning { Task { await stopTune(); answerSelected() }; return }
-        qso = QSOSequencer(answer: dx, dxGrid: p.grid, heardSnr: Int(m.snrDb.rounded()),
-                           myCall: config.callsign, myGrid: config.grid)
+        let snr = Int(m.snrDb.rounded())
+        if p.toCall?.uppercased() == config.callsign.uppercased() {
+            qso = QSOSequencer(resuming: p, dxGrid: p.grid ?? knownGrid(for: dx), heardSnr: snr,
+                               myCall: config.callsign, myGrid: config.grid)
+        } else {
+            qso = QSOSequencer(answer: dx, dxGrid: p.grid, heardSnr: snr,
+                               myCall: config.callsign, myGrid: config.grid)
+        }
         txParity = (activity[i].parity ?? SlotClock.parity(at: Date())).toggled
         setTxOffset(m.frequencyHz)              // call on their frequency
         selectedIndex = nil                     // clear: panel now shows the live QSO

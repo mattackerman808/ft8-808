@@ -54,6 +54,17 @@ final class FrequencyPickerTests: XCTestCase {
         XCTAssertEqual(pick(map), 1400, accuracy: 150)
     }
 
+    func testPicksClearHighSpectrumOverBusyCenter() {
+        // The screenshot case: low-mid band is busy, a clear stretch sits up high.
+        // Centrality is only a tiebreaker, so we must move to the clear spectrum.
+        let wide: ClosedRange<Float> = 500...2500
+        var map = [Float](repeating: 0.6, count: cols)
+        for c in col(ofFreq: 1900)...col(ofFreq: 2300) { map[c] = 0.05 }
+        let hz = FrequencyPicker.clearOffset(busyMap: map, passband: band, usable: wide)!
+        XCTAssertGreaterThan(hz, 1800, "should pick the clear high spectrum, not the busy center")
+        XCTAssertLessThan(hz, 2400)
+    }
+
     func testTooSmallMapReturnsNil() {
         XCTAssertNil(FrequencyPicker.clearOffset(busyMap: [0, 0, 0], passband: band, usable: usable))
     }

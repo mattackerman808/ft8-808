@@ -627,7 +627,7 @@ final class WaterfallModel: ObservableObject {
     func autoPickTxFrequency() {
         guard let hz = FrequencyPicker.clearOffset(busyMap: avgSpectrum,
                                                    passband: pickPassband,
-                                                   usable: 800...2000) else {
+                                                   usable: 500...2500) else {
             status = "No spectrum yet — wait for a slot"
             return
         }
