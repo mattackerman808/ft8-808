@@ -146,18 +146,21 @@ struct QSOPanel: View {
     private var controls: some View {
         HStack(spacing: 10) {
             Button { model.callCQ() } label: {
-                Label("Call CQ", systemImage: "megaphone")
+                Label(model.isCallingCQ ? "Stop CQ" : "Call CQ",
+                      systemImage: model.isCallingCQ ? "stop.circle" : "megaphone")
             }
             .buttonStyle(.borderedProminent)
-            .tint(.blue)
+            .tint(model.isCallingCQ ? .orange : .blue)
             .disabled(model.myCall.isEmpty || !model.txEnabled)
-            .help(model.txEnabled ? "Call CQ" : "Enable TX first")
+            .help(model.txEnabled ? (model.isCallingCQ ? "Stop calling CQ" : "Call CQ")
+                                  : "Enable TX first")
 
             Button { model.haltTX() } label: {
                 Label("Halt TX", systemImage: "stop.fill")
             }
             .tint(.red)
-            .disabled(!model.txEnabled && !model.sending)
+            .disabled(!model.sending)   // cuts the current over; only while sending
+            .help("Stop the current transmission (stays armed)")
 
             Button { model.clearQSO() } label: {
                 Label("Clear", systemImage: "xmark")

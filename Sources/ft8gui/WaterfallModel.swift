@@ -58,6 +58,8 @@ final class WaterfallModel: ObservableObject {
     /// Cleared after the first transmit so ongoing QSOs keep their grace.
     private var pounceArmed = false
     private let pounceWindow: Double = 2.0   // s into our slot; message must still fit 15 s
+    /// Set by Halt to cut the current over without disabling TX; reset each send.
+    private var abortCurrent = false
     /// Which 15 s sequence we transmit in (even :00/:30, odd :15/:45). Operator-
     /// settable for CQ; auto-set to the opposite slot when answering a decode.
     @Published var txParity: SlotParity = .even
@@ -403,10 +405,16 @@ final class WaterfallModel: ObservableObject {
         status = txEnabled ? "Answering \(call)" : "Answering \(call) — Enable TX to send"
     }
 
-    /// Load the CQ sequence (sits on Tx6), keeping the operator's chosen cycle.
-    /// Replaces any current QSO; transmits next slot if TX is enabled.
+    /// Call CQ — and a toggle: while we're still calling CQ (nobody's answered),
+    /// pressing it again stops (clears the CQ). Keeps the master TX toggle as-is.
     func callCQ() {
         guard !myCall.isEmpty else { return }
+        if let q = qso, q.phase == .cq {           // already calling CQ → stop
+            cutCurrentSend()
+            qso = nil
+            status = txEnabled ? "CQ stopped — still armed" : "CQ stopped"
+            return
+        }
         qso = QSOSequencer(callCQ: myCall, myGrid: myGrid, directive: config.cqDirective)
         selectedID = nil
         pounceArmed = true
@@ -415,19 +423,19 @@ final class WaterfallModel: ObservableObject {
                            : "CQ loaded — Enable TX to send"
     }
 
-    /// Clear the loaded contact (master TX toggle is left as-is).
+    /// Clear the loaded contact and stop any in-flight over (cancels an armed
+    /// QSO). The master TX toggle is left on, ready for the next station / CQ.
     func clearQSO() {
+        cutCurrentSend()
         qso = nil
         selectedID = nil
-        status = txEnabled ? "TX enabled — pick a station or Call CQ"
-                           : (isRunning ? "Listening…" : "Idle")
+        status = txEnabled ? "Cleared — TX still armed" : (isRunning ? "Listening…" : "Idle")
     }
 
     // MARK: Transmit
 
     /// Master TX toggle. On → the slot loop transmits the loaded QSO each correct
-    /// slot; off → disarm (any in-flight message still finishes). Loading a
-    /// contact / Call CQ feeds the sequencer; this just gates whether it keys.
+    /// slot. Off → disarm AND halt any in-flight over immediately.
     func enableTX() async {
         if txEnabled { disarmTX(); return }
         if tuning { await stopTune() }
@@ -438,24 +446,32 @@ final class WaterfallModel: ObservableObject {
         startTxLoop()
     }
 
-    /// Stop arming; an in-flight transmission completes (not cut).
+    /// Master off: stop the slot loop, cut any in-flight over, drop PTT.
     func disarmTX() {
         txEnabled = false
         pounceArmed = false
-        status = sending ? "Finishing current TX…" : (isRunning ? "Listening…" : "Idle")
+        txTask?.cancel(); txTask = nil
+        cutCurrentSend()
+        status = isRunning ? "Listening…" : "Idle"
     }
 
-    /// Stop transmitting immediately, mid-message if needed.
+    /// Halt — stop the CURRENT over only; leaves TX armed (the loop resumes next
+    /// cycle). Toggle Enable TX off, or Clear / Call CQ, to actually disarm.
     func haltTX() {
-        txEnabled = false
+        cutCurrentSend()
+        status = txEnabled ? "TX halted — still armed" : "TX halted"
+    }
+
+    /// Stop the in-flight transmission now: break the send's wait loop, kill the
+    /// audio, drop PTT. Does NOT touch the master toggle or cancel the slot loop.
+    private func cutCurrentSend() {
+        abortCurrent = true
         pounceArmed = false
-        txTask?.cancel(); txTask = nil
         tx?.stop(); tx = nil
         stopMeterPoll()
         rigState.transmitting = false
         sending = false
         Task { try? await rig?.setPTT(false) }
-        status = "TX halted"
     }
 
     private func startTxLoop() {
@@ -518,23 +534,25 @@ final class WaterfallModel: ObservableObject {
         }
         tx = out
         sending = true
+        abortCurrent = false           // fresh over; Halt sets this to cut it short
         rigState.transmitting = true   // instant TX lamp/glow; the poll confirms it
         startMeterPoll()               // live PWR / ALC / SWR off the rig over CAT
         addTxEcho(text)                // show our own TX in the decode lists
         status = "Sending: \(text)"
 
-        // Finish the message even if disarmed mid-flight; Halt cancels the task.
-        while !player.isFinished && !Task.isCancelled {
+        // Run the message out; Halt (abortCurrent) or disarm (task cancel) cut it.
+        while !player.isFinished && !Task.isCancelled && !abortCurrent {
             try? await Task.sleep(nanoseconds: 40_000_000)
         }
+        let aborted = abortCurrent || Task.isCancelled
         out.stop()
         tx = nil
         try? await rig.setPTT(false)
         stopMeterPoll()
         rigState.transmitting = false
         sending = false
-        if closing && txEnabled { completeQSO() }
-        else { status = txEnabled ? "TX enabled" : (isRunning ? "Listening…" : "Idle") }
+        if closing && txEnabled && !aborted { completeQSO() }       // don't log a cut QSO
+        else if !aborted { status = txEnabled ? "TX enabled" : (isRunning ? "Listening…" : "Idle") }
     }
 
     /// Insert our own transmitted message into the decode lists (TX echo) so the
@@ -697,6 +715,10 @@ final class WaterfallModel: ObservableObject {
     }
 
     var transmitting: Bool { rigState.transmitting }
+
+    /// True while we're calling CQ and nobody has answered yet (so the Call CQ
+    /// button can act as a toggle / show "Stop CQ").
+    var isCallingCQ: Bool { qso?.phase == .cq }
 
     /// Needle targets (power, SWR, ALC) as 0...1 fractions. In Test mode they
     /// sweep so the meters can be seen without transmitting.
