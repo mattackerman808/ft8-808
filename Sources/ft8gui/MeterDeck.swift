@@ -11,7 +11,11 @@ struct MeterStrip: View {
     @State private var alc = NeedleDamper()
 
     var body: some View {
-        TimelineView(.animation) { tl in
+        // Only animate at speed while there's something to show (transmitting or
+        // the meter self-test). Idle, drop to ~6 Hz so the needles still settle to
+        // zero without redrawing the gauges at the display's 60–120 Hz forever.
+        let lively = model.transmitting || model.meterTest
+        return TimelineView(.animation(minimumInterval: lively ? 1.0 / 30.0 : 1.0 / 6.0)) { tl in
             let t = tl.date.timeIntervalSinceReferenceDate
             let target = model.meterTargets(testTime: t)
             let glow = model.transmitting ? 1.0 : (model.meterTest ? 0.65 : 0.32)

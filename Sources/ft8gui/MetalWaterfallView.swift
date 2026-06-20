@@ -1,9 +1,10 @@
 import SwiftUI
 import MetalKit
 
-/// Hosts the `MTKView` and binds it to the model's renderer. Runs at the
-/// display's native refresh (60 Hz, or 120 Hz on ProMotion) and scrolls
-/// smoothly between data rows.
+/// Hosts the `MTKView` and binds it to the model's renderer. Scrolls smoothly
+/// between data rows at a modest fixed rate — the data arrives at ~47 rows/s, so
+/// 30 fps is ample and keeps continuous GPU load (and heat → thermal throttling
+/// over long sessions) low rather than redrawing at the panel's 60/120 Hz.
 struct MetalWaterfallView: NSViewRepresentable {
     let renderer: WaterfallRenderer
 
@@ -13,7 +14,7 @@ struct MetalWaterfallView: NSViewRepresentable {
         view.colorPixelFormat = .bgra8Unorm
         view.depthStencilPixelFormat = .depth32Float
         view.clearColor = MTLClearColorMake(0.02, 0.02, 0.06, 1)
-        view.preferredFramesPerSecond = 120        // capped to the panel's refresh
+        view.preferredFramesPerSecond = 30
         view.isPaused = false
         view.enableSetNeedsDisplay = false          // continuous, vsync-driven
         return view
