@@ -835,7 +835,9 @@ final class WaterfallModel: ObservableObject {
         frameCount += 1
         let now = CACurrentMediaTime()
         let elapsed = now - rateClock
-        if elapsed >= 0.5 {
+        // `frameRate` is @Published and a change re-lays-out the whole UI (the two
+        // big decode VStacks). It's only a status readout, so update it slowly.
+        if elapsed >= 3.0 {
             frameRate = Double(frameCount) / elapsed
             frameCount = 0
             rateClock = now
